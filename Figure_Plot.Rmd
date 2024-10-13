@@ -1,0 +1,146 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(Seurat)
+```
+
+
+```{r}
+pbmc <- readRDS("../data/pbmc_data.rds")
+
+```
+
+```{r}
+UMAPPlot(pbmc,label = T,group.by = "seurat_clusters") + UMAPPlot(pbmc,label = T)
+
+View(pbmc@meta.data)
+```
+
+
+```{r}
+#cluster热图
+mk <- pbmc.markers %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1) %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::arrange(p_val_adj ,avg_log2FC) %>%
+  dplyr::slice_head(n = 5)
+
+library(ggSCvis)
+library(ggplot2)
+library(grid)
+ggscplot(object = pbmc,
+         features = mk$gene,
+         featuresAnno = mk$cluster,
+         mapping = aes(x = cell,y = gene_name)) +
+  geom_tile(aes(fill = value)) +
+  scale_fill_gradient(low = "grey90",high = "red") +
+  facet_hetamap(facet_col = "seurat_clusters",
+                facet_row = "featureAnno",
+                strip.col = circlize::rand_color(9),
+                space = "fixed",
+                scales = "free")
+ggsave("../results/figure_raw/blood_heatmap.tiff",dpi = 300,units = c("in"),width = 10,height = 12,create.dir = T)
+```
+
+```{r}
+library(ClusterGVis)
+library(org.Mm.eg.db)
+library(Seurat)
+
+pbmc <- SetIdent(pbmc,value = pbmc@meta.data$cell_raw)
+table(pbmc@meta.data$cell_raw)
+pbmc.markers.all <- Seurat::FindAllMarkers(pbmc,
+                               only.pos = TRUE,
+                               min.pct = 0.25,
+                               logfc.threshold = 0.25)
+
+saveRDS(pbmc.markers.all,"../results/cell_type_raw_markers.rds")
+
+#saveRDS(st.data,"../results/st.data.rds")
+st.data <- readRDS("../results/st.data.rds")
+pbmc.markers <- pbmc.markers.all %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(n = 20, wt = avg_log2FC)
+
+
+st.data <- prepareDataFromscRNA(object = pbmc,
+                                diffData = pbmc.markers,
+                                showAverage = TRUE)
+
+enrich <- enrichCluster(object = st.data,
+                        OrgDb = org.Mm.eg.db,
+                        type = "BP",
+                        organism = "mmu",
+                        pvalueCutoff = 0.5,
+                        topn = 5,
+                        seed = 5201314)
+# add gene name
+markGenes = unique(pbmc.markers$gene)[sample(1:length(unique(pbmc.markers$gene)),40,
+                                             replace = F)]
+
+# line plot
+visCluster(object = st.data,
+           plot.type = "line")
+
+visCluster(object = st.data,
+           plot.type = "heatmap",
+           column_names_rot = 90,
+           markGenes = markGenes,
+           cluster.order = c(1:8))
+
+tiff('../results/figure_raw/blood/cell_type_heatmap.tiff',width = 16,height = 12,units = "in",res = 300)
+visCluster(object = st.data,
+           plot.type = "both",
+           column_names_rot = 45,
+           show_row_dend = F,
+           markGenes = markGenes,
+           markGenes.side = "left",
+           annoTerm.data = enrich,
+           line.side = "left",
+           cluster.order = c(1:8),
+           go.col = rep(jjAnno::useMyCol("stallion",n = 8),each = 5),
+           add.bar = T)
+dev.off()
+
+```
+
+
+```{r}
+cols_1 <-c("#88c4e8","#db6968","#982b2b","#0074b3",
+        "#e5ce81","#f47720","#459943","#bdc3d2",
+        "#606f8a","#ea9c9d","#af2934","#ffe327","#2f4e87","#b0b9b8","#f0eedf",
+        "#aed4e9","#f4a69a","#3ba889","#4593c3","#f18e0c",
+        "#262a35","#c5942e","#a2a7ab")
+
+tiff("../results/figure_raw/blood/dimplot.tiff",units = "in",res = 300,width = 15,height = 8)
+UMAPPlot(pbmc,
+         cols = cols_1,
+         group.by = "seurat_clusters",split.by = "group")
+dev.off()
+```
+
+```{r}
+colon_marker <- readRDS("../results/figure_raw/colon/nos2.marker.rds")
+rm(colon_marker)
+
+library(scRNAtoolVis)
+tiff("../results/figure_raw/colon/diff_gene.tiff",res = 300,units = "in",width = 10,height = 8)
+jjVolcano(diffData = colon_marker)
+dev.off()
+```
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Cmd+Option+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Cmd+Shift+K* to preview the HTML file). 
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.
+
