@@ -1,0 +1,1723 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(Seurat)
+library(org.Mm.eg.db)
+library(openxlsx)
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+library(cowplot)
+library(Biobase)
+library(Mfuzz)
+```
+
+#elisa
+```{r}
+
+# TNF
+tnf <- data.frame(
+  group = c('N', 'N', 'N', 'N', 'N', 'N', 'N', 'N', 'N', 'N', 'A', 'A', 'A', 'A', 'A', 'B', 'B', 'B', 'B', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'C', 'D', 'D', 'D', 'D', 'D', 'E', 'E', 'E', 'E', 'E', 'F', 'F', 'F', 'F', 'F', 'G', 'G', 'G', 'G', 'G', 'G', 'G', 'I', 'I', 'I', 'I', 'I', 'J', 'J', 'J', 'J', 'J', 'K', 'K', 'K', 'K', 'K', 'K', 'L', 'L', 'L', 'L', 'L', 'L', 'L', 'L'),
+  sample_id = c('N1', 'N2', 'N3', 'N4', 'N5', 'N6', 'N7', 'N8', 'N9', 'N10', 'A1', 'A2', 'A3', 'A4', 'A5', 'B2', 'B3', 'B4', 'B5', 'C1', 'C8', 'C3', 'C4', 'C5', 'C6', 'C7', 'C9', 'D1', 'D2', 'D3', 'D4', 'D5', 'E1', 'E2', 'E3', 'E4', 'E5', 'F1', 'F2', 'F3', 'F4', 'F5', 'G1', 'G2', 'G3', 'G4', 'G5', 'G6', 'G7', 'I1', 'I2', 'I3', 'I4', 'I5', 'J1', 'J2', 'J3', 'J4', 'J5', 'K1', 'K2', 'K3', 'K4', 'K5', 'K6', 'L1', 'L2', 'L3', 'L4', 'L5', 'L6', 'L7', 'L8'),
+  Value = c(0.230769231, -34.57692308, -26.30769231, -35.53846154, -34.96153846, -40.72, -46.92, -47.12, -46.12, -50.52, -20.73, 3.12, -14.96, 38.50, -1.50, -18.42, 62.73, -24.58, -15.73, 80.81, 40.04, -17.65, 63.12, 1.96, -2.27, 64.27, 66.19, 684.27, 428.88, 657.73, 134.27, 43.50, 5.48, 3.88, -4.72, -21.72, -26.92, -13.72, -12.52, -15.72, 5.08, -38.12, -35.92, 47.68, 73.48, 22.48, -5.32, -17.08, 23.50, 891.68, 869.88, 770.48, 970.08, 1114.08, 421.08, 338.48, 417.68, 330.48, 424.68, 173.28, 473.08, 525.48, 483.88, 51.68, 149.85, 56.68, 61.68, 6.28, 16.88, 186.68, 42.73, 7.15, 62.15)
+)
+
+# 设置group的因子等级，使N排第一
+tnf$group <- factor(tnf$group, levels = c("N", unique(tnf$group)[unique(tnf$group) != "N"]))
+
+# 检查因子等级
+levels(tnf$group)
+
+
+ggplot(tnf, aes(x=group, y=Value)) + 
+  geom_bar(stat="summary", fun.y="mean", fill="steelblue") + 
+  theme_minimal() +
+  labs(title="Bar plot of Values by Group", y="Mean Value") +
+  geom_errorbar(stat="summary", fun.data=mean_se, width=0.2)
+
+
+
+
+# 函数计算均值和标准误
+mean_se <- function(y) {
+  data.frame(y = mean(y), ymin = mean(y) - sd(y)/sqrt(length(y)), ymax = mean(y) + sd(y)/sqrt(length(y)))
+}
+
+# 绘制图形
+ggplot(tnf, aes(x=group, y=Value)) + 
+  geom_bar(stat="summary", fun="mean", fill="steelblue", position=position_dodge(width=0.8)) + 
+  theme_minimal() +
+  labs(title="Bar plot of Values by Group", y="Mean Value") +
+  geom_errorbar(aes(ymin = ..ymin.., ymax = ..ymax..), stat="summary", fun.data=mean_se, width=0.2, position=position_dodge(width=0.8)) +
+  geom_point(aes(group=sample_id), position=position_jitter(width=0.2, height=0))
+
+
+```
+
+```{r}
+results_wilcox <- list()
+
+groups_to_compare <- unique(tnf$group)
+groups_to_compare <- groups_to_compare[groups_to_compare != "N"]
+
+for (g in groups_to_compare) {
+  data_subset <- tnf[tnf$group %in% c("N", g), ]
+  if (length(unique(data_subset$group)) == 2) {  # 确保仅比较两个组
+    results_wilcox[[g]] <- wilcox.test(data_subset$Value[data_subset$group == "N"], 
+                                       data_subset$Value[data_subset$group == g])
+  }
+}
+
+results_wilcox
+
+```
+
+
+```{r}
+il6 <- data.frame(
+  group = c(rep("N", 10), rep("A", 5), rep("B", 4), rep("C", 8), rep("D", 5), rep("E", 5), rep("F", 5), rep("G", 7), rep("I", 5), rep("J", 5), rep("K", 6), rep("L", 8)),
+  sample_id = c("N1", "N10", "N2", "N3", "N4", "N5", "N6", "N7", "N8", "N9", "A1", "A2", "A3", "A4", "A5", "B2", "B3", "B4", "B5", "C1", "C3", "C4", "C5", "C6", "C7", "C8", "C9", "D1", "D2", "D3", "D4", "D5", "E1", "E2", "E3", "E4", "E5", "F1", "F2", "F3", "F4", "F5", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "I1", "I2", "I3", "I4", "I5", "J1", "J2", "J3", "J4", "J5", "K1", "K2", "K3", "K4", "K5", "K6", "L1", "L2", "L3", "L4", "L5", "L6", "L7", "L8"),
+  Value = c(-47.435, -42.365, -47.275, -43.725, -44.535, -50.34, -41.43, -31.675, -25.48, -31.83, 549.56, 693.45, 561.82, 760.87, 739.58, 780.55, 916.37, 822.81, 858.3, 900.56, 627.96, 765.07, 850.24, 949.6, 905.08, 831.52, 858.3, 1004.12, 965.09, 857.01, 855.4, 995.41, 251.56, 374.21, 252.49, 239.175, 135.885, 411.065, 626.475, 564.53, 706.535, 188.225, -6.59, 777, 812.92, 796.82, 782.88, 265.66, 619.89, 1122.02, 954.775, 1122.02, 1122.02, 1008.05, 1062.56, 1032.205, 1004.02, 1004.02, 1032.205, 1059.925, 972.585, 1004.02, 1004.02, 1001.85, 806.36, 899.18, 947.65, 292.13, 505.22, 992.405, 799.585, 518.105, 703.125)
+)
+
+il6$group <- factor(il6$group, levels = c("N", unique(il6$group)[unique(il6$group) != "N"]))
+
+ggplot(il6, aes(x=group, y=Value)) + 
+  geom_bar(stat="summary", fun="mean", fill="steelblue", position=position_dodge(width=0.8)) + 
+  theme_minimal() +
+  labs(title="Bar plot of Values by Group", y="Mean Value") +
+  geom_errorbar(aes(ymin = ..ymin.., ymax = ..ymax..), stat="summary", fun.data=mean_se, width=0.2, position=position_dodge(width=0.8)) +
+  geom_point(aes(group=sample_id), position=position_jitter(width=0.2, height=0))
+
+```
+##elisa画图2
+```{r}
+library(tibble)
+library(tidyverse)
+library(ggplot2)
+```
+
+
+```{r}
+#吸光度数据
+
+labels <- read.table(textConnection("
+N1	N6	L6	L6	C1	D1
+N2	N7	L7	L7	C8	D2
+N3	N8	L8	L8	C3	D3
+N4	N9	A1	Q1	C4	D4
+N5	N10	A2	B2	C5	D5
+G6	G6	A3	B3	C6	Q2
+G7	G7	A4	B4	C7	Q3
+K6	K6	A5	B5	C9	Q4
+"), header = F, fill = TRUE)
+
+values <- read.table(textConnection("
+0.072	0.187	0.348	0.124	0.375	0.213
+0.157	0.278	0.458	0.148	0.331	0.262
+0.095	0.256	0.543	0.17	0.325	0.326
+0.057	0.187	0.349	0.019	0.344	0.266
+0.016	0.159	0.332	0.126	0.268	0.253
+0.039	0.175	0.233	0.064	0.217	0.027
+0.071	0.161	0.352	0.037	0.247	0.098
+0.037	0.143	0.273	0.018	0.18	0
+"), header = FALSE)
+```
+
+```{r}
+#合并吸光度数据
+
+labels_vec <- as.character(unlist(labels))
+values_vec <- as.numeric(unlist(values))
+
+# 创建一个新的数据框
+data <- data.frame(Label = labels_vec, Value = values_vec)
+
+# 将数据转换为长格式
+long_data <- data %>% 
+  mutate(Sample = sub("(.).*", "\\1", Label)) %>% # 提取样本名的唯一标识符
+  group_by(Sample, Label)                     # 按样本名和重复的标签分组
+ 
+# 根据Label计算平均值，但排除Sample为"N"的情况
+average_data <- long_data %>% 
+  # 只选择Sample不是"N"的行进行分组和计算
+  filter(Sample != "N" & Sample != "Q") %>% 
+  group_by(Label) %>% 
+  summarise(Average = mean(Value))
+
+# 对于Sample是"N"的情况，我们不计算平均值，因为它们是唯一的
+unique_n_data <- long_data %>% 
+  filter(Sample == "N") %>%
+  mutate(Average = Value)
+
+# 将两部分数据重新合并，这样就保留了Sample为"N"的原始值，而其他的则为平均值
+final_data <- bind_rows(average_data, unique_n_data) %>%
+  dplyr::select(-c(Value,Sample)) %>%
+  mutate(Group = sub("(.).*", "\\1", Label))
+
+
+```
+
+##拟合标准曲线
+```{r}
+#复制excel中的浓度梯度
+concentrations <- as.vector(read.table("clipboard", header = FALSE)$V1)
+```
+
+
+```{r}
+# 复制标准样品吸光度数据到粘贴板，每个浓度下有两个吸光度值
+absorbances <- as.matrix(read.table("clipboard", header = FALSE, sep = "\t"))
+```
+
+```{R}
+# 计算每个浓度下吸光度的平均值
+absorbance_means <- rowMeans(absorbances)
+
+# 创建数据框
+elisa_data <- data.frame(Concentration = concentrations, Absorbance = absorbance_means)
+
+# 使用线性回归模型拟合数据
+lm_model <- lm(Absorbance ~ Concentration, data = elisa_data)
+
+# 摘要统计信息，其中包括R²
+summary_stats <- summary(lm_model)
+
+# 提取R²值
+r_squared <- summary_stats$r.squared
+print(r_squared)
+
+# 可选：创建标准曲线图
+plot(elisa_data$Concentration, elisa_data$Absorbance,
+     main = "ELISA Standard Curve",
+     xlab = "Concentration",
+     ylab = "Absorbance",
+     pch = 19)+
+  abline(lm_model, col = "blue") # 添加拟合线
+
+summary_stats$coefficients
+
+a <- summary_stats$coefficients[2,1]
+b <- summary_stats$coefficients[1,1]
+
+# 计算预测浓度
+final_data$Predicted_Concentration <- (final_data$Average - b) / a
+```
+
+```{r}
+elisa_1 <- final_data
+elisa_2 <- final_data
+
+elisa_data <- rbind(elisa_1,elisa_2) %>%
+  mutate(Sepsis = case_when(
+    Group %in% c("A","B","C","D") | Label %in% paste0("N",c(1:7)) ~ "CLP",
+    Group %in% c("E","F","G") | Label %in% paste0("N",c(8:13)) ~ "Pneumonia",
+    Group %in% c("I","J","K","L") | Label %in% paste0("N",c(14:20)) ~ "LPS"
+  ))
+```
+
+```{r}
+il6 <- elisa_data
+citrulline <- elisa_data
+fabp2 <- elisa_data
+```
+
+```{r}
+saveRDS(tnf,"./elisa/tnf.rds")
+saveRDS(citrulline,"./elisa/citrulline.rds")
+saveRDS(il6,"./elisa/il6.rds")
+saveRDS(fabp2,"./elisa/fabp2.rds")
+```
+
+```{r}
+
+il6 <- readRDS("./elisa/il6.rds")
+tnf <- readRDS("./elisa/tnf.rds")
+
+
+
+il6 <- il6 %>%
+  mutate(MC = "IL-6")
+
+
+tnf <- tnf %>%
+  mutate(MC = "TNF")
+
+citrulline <- citrulline %>%
+  mutate(MC = "citrulline")
+
+fabp2 <- fabp2 %>%
+  mutate(MC = "FABP2")
+```
+
+
+
+```{r}
+tnf <- readRDS("./elisa/tnf.rds")
+tnf_list <- split(tnf,tnf$Sepsis)
+citru_list <- split(citrulline,citrulline$Sepsis)
+il6_list <- split(il6,il6$Sepsis)
+citrulline_list <- split(citrulline,citrulline$Sepsis)
+View(citru_list$CLP)
+```
+
+```{r}
+il6_dat <- bind_rows(il6)
+
+dir.create("../elisa_result")
+openxlsx::write.xlsx(il6,"../elisa_result/il6.xlsx")
+```
+
+
+```{r}
+#anova
+test_data <- citrulline_list$Pneumonia
+test_data$Group <- as.factor(test_data$Group)
+group_levels <- levels(test_data$Group)
+group_levels <- c("N", group_levels[group_levels != "N"])
+test_data$Group <- factor(test_data$Group, levels = group_levels)
+# 对 citru_list$CLP 数据集进行 ANOVA
+res.aov <- aov(Average ~ Group, data = test_data)
+
+# 查看方差分析的结果
+summary(res.aov)
+```
+
+```{r}
+# 事后的多重比较测试
+library(multcomp)
+
+dunnett_test <- glht(res.aov, linfct = mcp(Group = "Dunnett"))
+
+# 查看测试结果
+summary(dunnett_test)
+```
+
+##t检验
+```{r}
+# 提取组 A 和 B 的 Average 数据
+data_a <- test_data$Average[test_data$Group == "C"]
+data_b <- test_data$Average[test_data$Group == "N"]
+
+# 执行 t 检验
+# 默认使用 Welch 的 t 检验
+t_test_result <- t.test(data_a, data_b)
+
+# 查看 t 检验结果
+t_test_result
+
+table(test_data$Group)
+
+
+
+```
+
+##画图
+
+```{r}
+lps <- rbind(il6[il6$Sepsis == "LPS",],tnf[tnf$Sepsis == "LPS",])
+
+clp <- rbind(il6[il6$Sepsis == "CLP",],tnf[tnf$Sepsis == "CLP",])
+
+pneumonia <- rbind(il6[il6$Sepsis == "Pneumonia",],tnf[tnf$Sepsis == "Pneumonia",])
+```
+
+```{r}
+lps$Group <- as.factor(lps$Group)
+
+lps <- lps %>%
+  mutate(Group = as.factor(Group)) %>%
+  mutate(Group = factor(Group, levels = c("N", setdiff(levels(Group), "N"))))
+
+levels(lps$Group)
+```
+
+
+
+```{r}
+library(ggplot2)
+plot_data <- pneumonia
+time_point <- c("Con","12h","24h","48h")
+
+plot_data$Group <- as.factor(plot_data$Group)
+group_levels <- levels(plot_data$Group)
+group_levels <- c("N", group_levels[group_levels != "N"])
+plot_data$Group <- factor(plot_data$Group, levels = group_levels)
+# 函数计算均值和标准误
+mean_se <- function(y) {
+  data.frame(y = mean(y), ymin = mean(y) - sd(y)/sqrt(length(y)), ymax = mean(y) + sd(y)/sqrt(length(y)))
+}
+
+# 绘制图形
+# tiff("../figure/Fig. 1/Pneumonia_elisa.tiff",res = 300,units = "in",height = 5,width = 5)
+ggplot(data = plot_data, mapping = aes(x = Group, y = Predicted_Concentration, fill = MC)) + 
+  geom_bar(stat = "summary", fun = "mean", position = position_dodge(width = 0.8)) +
+  theme_minimal() +
+  labs(title = element_blank(), y = element_blank(),x = "Pneumonia group") +
+  geom_errorbar(aes(ymin = ..ymin.., ymax = ..ymax..), stat = "summary", fun.data = mean_se, width = 0.2, position = position_dodge(width = 0.8)) +
+  geom_point(aes(group = interaction(Group, MC)), position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8))+
+  scale_fill_manual(values = cols_1)+
+  scale_x_discrete(labels= time_point)+
+  theme(axis.text.x = element_text(size=13, color="black", angle=0, hjust=1, vjust=0.5),legend.title = element_blank())
+# dev.off()
+```
+
+
+```{r}
+library(ggplot2)
+all_data <- rbind(lps, clp, pneumonia)
+
+tiff("../figure/Fig. 1/elisa_union.tiff",res = 300,units = "in",height = 5,width = 10)
+ggplot(data = all_data, mapping = aes(x = Group, y = Predicted_Concentration, fill = MC)) + 
+  geom_bar(stat = "summary", fun = "mean", position = position_dodge(width = 0.8)) +
+  geom_errorbar(aes(ymin = ..ymin.., ymax = ..ymax..), stat = "summary", fun.data = mean_se, width = 0.2, position = position_dodge(width = 0.8)) +
+  geom_point(aes(group = interaction(Group, MC)), position = position_jitterdodge(jitter.width = 0.2, dodge.width = 0.8)) +
+  scale_fill_manual(values = cols_1) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(size=13, color="black", angle=0, hjust=1, vjust=0.5), 
+        legend.title = element_blank(),
+        panel.grid.major = element_blank(), # 去掉主要网格线
+    panel.grid.minor = element_blank()) +
+  facet_wrap(~ Sepsis,scales = "free_x")+
+  labs(y = element_blank())+
+  scale_x_discrete(labels = element_blank()) 
+dev.off()
+
+
+```
+
+
+#整体降维图和箱线图合并
+```{r}
+library(ggpubr)
+library(ggsci)
+
+nos2 <- readRDS("./ns2_data.rds")
+
+View(nos2@reductions$umap@cell.embeddings)
+View(nos2@meta.data)
+
+n <- as.data.frame(nos2@reductions$umap@cell.embeddings)
+
+#umpa
+plot_data <- nos2@meta.data %>%
+  mutate(UMAP_1 = n$UMAP_1,
+         UMAP_2 = n$UMAP_2,
+         cell = rownames(nos2@meta.data)) %>%
+  dplyr::select(cell,cell_type,UMAP_1,UMAP_2)
+
+
+umap1 = ggplot(plot_data, aes(x=factor(cell_type), y=UMAP_1,fill=factor(cell_type))) + 
+  geom_boxplot()+
+  scale_fill_lancet(name = "cell_type")+
+  theme_bw()+
+  theme(axis.text.x  = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks.x = element_blank())+
+  coord_flip()
+umap1
+
+umap2 = ggplot(plot_data, aes(x=factor(cell_type), y=UMAP_2,fill=factor(cell_type))) + 
+  geom_boxplot()+
+  scale_fill_lancet(name = "cell_type")+
+  theme_bw()+
+  theme(axis.text.y  = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5))
+umap2
+
+UMAP_plot <- ggplot(plot_data,aes(x= UMAP_1, y = UMAP_2 ,color = factor(cell_type)))+
+  geom_point(size = 1 , alpha =1 )+
+  scale_color_lancet(name = "cell type")+
+  theme_bw()
+UMAP_plot
+
+plot_output<-ggarrange(umap1, NULL,
+          UMAP_plot,umap2,
+          ncol = 2, nrow = 2,  align = "hv",
+          widths = c(2,1), heights = c(1,2),
+          common.legend = TRUE)
+plot_output
+
+library(Seurat)
+
+tiff("../figure/Sientific data/tsne_plot.tiff",units = "in",res = 300,width = 10,height = 8)
+TSNEPlot(nos2,group.by = "cell_type",cols = cols_1)
+dev.off()
+```
+
+```{r}
+tiff("../figure/Fig. 1/umpa_un.tiff",res = 300,units = "in",width = 12,height = 10)
+plot_output
+dev.off()
+```
+
+
+
+```{r}
+#tsne的
+library(Seurat)
+library(ggpubr)
+library(ggsci)
+library(dplyr)
+library(ggplot2)
+
+# 1. 加载数据
+nos2 <- blood_data
+
+
+# 3. 准备绘图数据
+t <- as.data.frame(nos2@reductions$tsne@cell.embeddings)
+
+plot_data <- nos2@meta.data %>%
+  mutate(tSNE_1 = t$tSNE_1,
+         tSNE_2 = t$tSNE_2,
+         cell = rownames(nos2@meta.data)) %>%
+  dplyr::select(cell, cell_type, tSNE_1, tSNE_2)
+
+# 4. 绘图
+tsne1 = ggplot(plot_data, aes(x=factor(cell_type), y=tSNE_1,fill=factor(cell_type))) + 
+  geom_boxplot() +
+  scale_fill_lancet(name = "cell_type") +
+  theme_bw() +
+  theme(axis.text.x  = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks.x = element_blank()) +
+  coord_flip()
+
+tsne2 = ggplot(plot_data, aes(x=factor(cell_type), y=tSNE_2,fill=factor(cell_type))) + 
+  geom_boxplot() +
+  scale_fill_lancet(name = "cell_type") +
+  theme_bw() +
+  theme(axis.text.y  = element_blank(),
+        axis.title = element_blank(),
+        axis.ticks.y = element_blank(),
+        axis.text.x = element_text(angle = 45, vjust = 0.5))
+
+TSNE_plot <- ggplot(plot_data, aes(x= tSNE_1, y = tSNE_2 ,color = factor(cell_type))) +
+  geom_point(size = 1 , alpha =1 ) +
+  scale_color_lancet(name = "cell_type") +
+  theme_bw()
+
+plot_output <- ggarrange(tsne1, NULL,
+                         TSNE_plot, tsne2,
+                         ncol = 2, nrow = 2, align = "hv",
+                         widths = c(2,1), heights = c(1,2),
+                         common.legend = TRUE)
+plot_output
+```
+
+```{r}
+tiff("../blood_multi/figure/dimplot_xiangxian.tiff",res = 300,units = "in",width = 15,height = 12)
+plot_output
+dev.off()
+```
+
+
+#巨噬细胞
+```{r}
+
+Macrophage_sub <- readRDS("./Macrophage/data/Macrophage_sub_data.rds")
+
+tiff("./Macrophage/figure/subgroup_distinct_vlnplot.tiff",width = 10, height = 20, units = "in", res = 300)
+VlnPlot(Macrophage_sub,c("Ly6c2","Ccr2",
+                         "Cd68","Cx3cr1","Fcgr1","Adgre1","Cd63",
+                         "Itgae","Itgam","Cd24a","Cd209a","Itgax","Clec9a"),
+        stack = T,flip = T,group.by = "cell_name")
+dev.off()
+
+
+```
+
+```{r}
+
+
+VlnPlot(subset(Macrophage_sub,subset = cell_name %in% c("gMAC","MDM")), features = c("Tnf"), 
+        group.by = "cell_name",split.by = "group",pt.size = 0)
+ggsave("./Macrophage/figure/macrophage_TNF_expression.tiff",dpi = 300,width = 7,height = 3)
+
+
+tiff("./Macrophage/figure/macrophage_Ccr2_expression.tiff",units = "in",res = 300,width = 7,height = 4)
+VlnPlot(subset(Macrophage_sub,subset = cell_name %in% c("gMAC","MDM")),c("Nr4a1","Ccr2","Ccl2"),
+        group.by = "cell_name",split.by = "group",stack = T,flip = T)
+dev.off()
+```
+
+```{r}
+library(hdWGCNA)
+seurat_obj <- readRDS("hdWGCNA_object_macro.rds")
+modules <- GetModules(seurat_obj)
+```
+
+```{r}
+library(ClusterGVis)
+
+cell.name = "gMAC"
+gMAC <- subset(Macrophage_sub,subset = cell_name == cell.name)
+
+obj <- FindVariableFeatures(Tmigd1, nfeatures=3000)
+
+module.name = "MDG-6"
+gene.use <- modules$gene_name[modules$module == "MDG-6"]
+
+ave <- AverageExpression(gMAC, group.by = "group", assays=c("RNA"), features=gene.use)
+
+ingene <- ave$RNA
+gene_tpm <- data.matrix(ingene)
+
+#Mfuzz 用的数据格式
+eset <- new("ExpressionSet", exprs = gene_tpm)
+
+cm <- clusterData(exp = eset,
+                  cluster.method = "mfuzz",
+                  cluster.num = 9)
+
+visCluster(cm,plot.type = "line",ncol = 3)+xlab(paste0("Mfuzz result of ",module.name, " in ",cell.name))
+ggsave(paste0("./Macrophage/figure/Mfuzz result of ",module.name," in ",cell.name,".tiff"),dpi = 300,width = 15,height = 12)
+```
+
+
+```{r}
+
+cluster_gene <- cm$wide.res$gene[cm$wide.res$cluster == 9]
+
+
+dotplot(
+  enrichGO(
+    cluster_gene,
+    OrgDb = org.Mm.eg.db,
+    keyType = "SYMBOL",
+    ont="BP"
+  )
+)
+```
+
+```{r}
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(ggplot2)
+library(dplyr)
+
+a = 3
+b = 7
+c = 9
+
+# 获取各个cluster的基因列表
+cluster_a_genes <- cm$wide.res$gene[cm$wide.res$cluster == a]
+cluster_b_genes <- cm$wide.res$gene[cm$wide.res$cluster == b]
+cluster_c_genes <- cm$wide.res$gene[cm$wide.res$cluster == c]
+
+# 对每个cluster进行GO富集分析，并提取前5个通路
+enrich_a <- head(enrichGO(cluster_a_genes, OrgDb=org.Mm.eg.db, keyType="SYMBOL", ont="BP"), 8)
+enrich_b <- head(enrichGO(cluster_b_genes, OrgDb=org.Mm.eg.db, keyType="SYMBOL", ont="BP"), 8)
+enrich_c <- head(enrichGO(cluster_c_genes, OrgDb=org.Mm.eg.db, keyType="SYMBOL", ont="BP"), 8)
+
+# 将结果转化为data.frame并合并
+df_a <- as.data.frame(enrich_a)[, c("Description", "pvalue","GeneRatio")] %>% mutate(cluster=paste0("cluster",as.character(a)))
+df_b <- as.data.frame(enrich_b)[, c("Description", "pvalue","GeneRatio")] %>% mutate(cluster=paste0("cluster",as.character(b)))
+df_c <- as.data.frame(enrich_c)[, c("Description", "pvalue","GeneRatio")] %>% mutate(cluster=paste0("cluster",as.character(c)))
+
+combined_df <- rbind(df_a, df_b, df_c)
+
+# 使用ggplot2绘制dotplot
+tiff("./Macrophage/figure/dotplot_MDG-6_mfuzz_cluser_3_7_9.tiff",res = 300,units = "in",width = 6,height = 8)
+ggplot(combined_df, aes(x=cluster, y=Description, color=-log10(pvalue),size = GeneRatio)) + 
+  geom_point() +
+  theme_minimal() +
+  labs(size="GeneRatio") +
+  theme(axis.text.x=element_text(angle=45, hjust=1),
+        axis.title  = element_blank())+
+  scale_color_gradient(low = "#88c4e8",high = "#db6968")
+dev.off()
+```
+
+#T细胞
+```{r}
+
+T_cell <- readRDS("./T_cell/data/T_cell_sub_pathway_calculated.rds")
+T_cell_sub <- readRDS("./T_cell/data/T_cell_sub.rds")
+
+tiff("./T_cell/figure/T_cell_dimplot.tiff",res = 300,units = "in",width = 8,height = 4)
+DimPlot(T_cell,label = F,group.by = "cell_name",split.by = "group",cols = cols_1)
+dev.off()
+
+saveRDS(T_cell,"./T_cell/data/T_cell_sub.rds")
+
+pdf("./T_cell/figure/T_cell_subgroup_vlnplot.pdf")
+VlnPlot(T_cell,c("Cd3e","Cd3g","Cd8a","Cd4",
+                     "Klrd1",
+                     "Sell","Ccr7",
+                     "Cd8b1",
+                     "Cd69","Itgae","Ncr1",
+                     "Klrb1c","Tbx21",
+                     "S100a4","Lmo4"),
+        stack = T,flip = T)
+dev.off()
+
+
+```
+        
+        
+
+
+```{r}
+#热图
+T_cell
+library(ClusterGVis)
+library(Seurat)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+ClusterGVis_data <- T_cell
+
+ClusterGVis_data <- SetIdent(ClusterGVis_data,value = "cell_name")
+
+enterocyte_all.marker <- FindAllMarkers(ClusterGVis_data,
+                                        only.pos = T,
+                                        min.pct = 0.25,
+                                        logfc.threshold = 0.25)
+
+pbmc.markers <- enterocyte_all.marker %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(n = 20, wt = avg_log2FC)
+
+st.data <- prepareDataFromscRNA(object = ClusterGVis_data,
+                                diffData = pbmc.markers,
+                                showAverage = TRUE)
+
+enrich <- enrichCluster(object = st.data,
+                        OrgDb = org.Mm.eg.db,
+                        type = "BP",
+                        organism = "mmu",
+                        pvalueCutoff = 0.5,
+                        topn = 5,
+                        seed = 5201314)
+
+
+# add gene name
+markGenes = unique(pbmc.markers$gene)[sample(1:length(unique(pbmc.markers$gene)),40,
+                                             replace = F)]
+
+# line plot
+visCluster(object = st.data,
+           plot.type = "line")
+
+
+visCluster(object = st.data,
+           plot.type = "heatmap",
+           column_names_rot = 50,
+           markGenes = markGenes,
+           cluster.order = c(1:10))
+
+tiff("./T_cell/figure/T_cell_heatmap.tiff",res = 300,units = "in",height = 8,width = 16)
+visCluster(object = st.data,
+           plot.type = "both",
+           column_names_rot = 45,
+           show_row_dend = F,
+           markGenes = markGenes,
+           markGenes.side = "left",
+           annoTerm.data = enrich,
+           line.side = "left",
+           cluster.order = c(1:8),
+           go.col = rep(jjAnno::useMyCol("stallion",n = 8),each = 5),
+           add.bar = T)
+dev.off()
+
+table(T_cell@meta.data$cell_name)
+```
+
+```{r}
+#评分图
+library(tidyverse)
+
+data_long <- T_cell_sub@meta.data %>%
+  select(cell_name, group, Proliferation,Antigen_Presentation,AICD,Intrinsic_apoptosis,Migration,Pyroptosis) %>%
+  pivot_longer(cols = c(AICD,Antigen_Presentation,Proliferation,Intrinsic_apoptosis,Migration,Pyroptosis),
+               names_to = "Score_Type", values_to = "Score_Value")
+
+tiff("./T_cell/figure/T_cell_pathway_point.tiff",res = 300,units = "in",width = 10,height = 15)
+ggplot(data_long, aes(x = group, y = Score_Value, fill = group)) + 
+  geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+  facet_grid(Score_Type ~ cell_name, scales = "free", space = "free") + 
+  theme_minimal() +
+  labs(title = "Intestine Relative pathways about population shrink",
+       x = "Group",
+       y = "Score Value")+
+  scale_fill_manual(values = cols_1)
+dev.off()
+
+y_min <- quantile(data_long$Score_Value, 0.05)
+y_max <- quantile(data_long$Score_Value, 0.95)
+```
+
+
+```{r}
+#aDNT和nDNT的差别
+T_cell_sub <- SetIdent(T_cell_sub, value = "cell_name")
+dnt_deg <- FindMarkers(T_cell_sub,ident.1 = "aDNT",ident.2 = "nDNT")
+
+dnt_deg <- dexp(dnt_deg,1,-1)
+
+gene_up_trans <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = rownames(dnt_deg[dnt_deg$expr == "UP",]), 
+                 mart = mart)
+
+go_up_result <- enrichGO(gene = na.omit(gene_up_trans$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+
+kegg_up_result <- enrichKEGG(gene = na.omit(gene_up_trans$entrezgene_id), 
+                         organism = 'mmu')
+
+gene_down_trans <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = rownames(dnt_deg[dnt_deg$expr == "DOWN",]), 
+                 mart = mart)
+
+go_down_result <- enrichGO(gene = na.omit(gene_down_trans$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+
+kegg_down_result <- enrichKEGG(gene = na.omit(gene_down_trans$entrezgene_id), 
+                         organism = 'mmu')
+df <- as.data.frame(kegg_down_result)
+
+# 假设你的结果是data.frame格式，且pvalue是显著性水平的列
+top10_up <- head(kegg_up_result[order(kegg_up_result$Count), ], 10)
+top10_down <- head(kegg_down_result[order(kegg_down_result$Count), ], 10)
+top10_up$Direction <- "Upregulated"
+top10_down$Direction <- "Downregulated"
+# 合并结果
+combined_results <- rbind(top10_up, top10_down)
+
+combined_results$GeneCount <- as.numeric(sapply(strsplit(combined_results$GeneRatio, "/"), `[`, 1))
+
+p_go <- ggplot(combined_results, aes(x = Direction, y = reorder(Description, -GeneCount), size = GeneCount, color = p.adjust)) +
+  geom_point(alpha=0.7) +
+  scale_color_gradient(low = "blue", high = "red") +
+  labs(title = "Top GO Terms", x = "Direction", y = "GO Term Description", size = "Gene Count", color = "Adjusted p-value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right")
+ggsave("./T_cell/figure/DNT_go.pdf",plot = p_go,width = 10,height = 15)
+
+p_kegg <- ggplot(combined_results, aes(x = Direction, y = reorder(Description, -GeneCount), size = GeneCount, color = p.adjust)) +
+  geom_point(alpha=0.7) +
+  scale_color_gradient(low = "red", high = "blue") +
+  labs(title = "Top GO Terms", x = "Direction", y = "GO Term Description", size = "Gene Count", color = "Adjusted p-value") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1),
+        legend.position = "right")
+ggsave("./T_cell/figure/DNT_kegg.pdf",plot = p_kegg,width = 10,height = 15)
+barplot(kegg_down_result)
+dotplot(kegg_down_result,showCategory = 10)
+
+
+```
+
+
+
+```{r}
+#aDNT时间差异
+Trm <- subset(T_cell_sub,subset = cell_name == "Trm")
+
+Trm@meta.data$group <- as.character(Trm@meta.data$group)
+
+Trm <- SetIdent(Trm,value = "group")
+
+trm <- FindAllMarkers(Trm)
+
+
+trm <- dexp_se(trm,0.5,-0.5)
+
+
+table(aDNT@meta.data$group)
+```
+
+```{r}
+#NKT24h 和 48h区别
+T_cell_sub <- readRDS("./T_cell/data/T_cell_sub_pathway_calculated.rds")
+#NKT细胞
+nkt <- subset(T_cell_sub,subset = cell_name == "NKT")
+nkt <- SetIdent(nkt,value = "group")
+nkt.makrer <- FindMarkers(nkt,ident.1 = "48h",ident.2 = "24h")
+
+nkt.res <- expr_and_go_kegg(nkt.makrer)
+
+nkt.res.24hvscon <- expr_and_go_kegg(FindMarkers(nkt,ident.1 = "24h",ident.2 = "Control"))
+
+
+# 使用ggplot2来创建气泡图
+p <- ggplot(df.all.top10, aes(x = Group, y = Description, size = GeneRatio, color = p.adjust)) +
+  geom_point(alpha = 0.6) +
+  theme_minimal() +
+  labs(title = "Top 10 GO Enrichment Analysis", x = "Time Group", y = "GO Term", size = "Gene Ratio", color = "Adjusted p-value") +
+  theme(legend.position = "right")
+
+ggsave("./T_cell/figure/NKT_dotplot_24h_28h.pdf",plot = p,width = 11,height = 10)
+
+tiff("./T_cell/figure/T_cell_nkt_dotplot.tiff",units = "in",res = 300,width = 7,height = 10)
+nkt.res$figure.go
+dev.off()
+```
+
+
+
+```{r}
+
+cd8 <- subset(T_cell_sub,subset = cell_name == "CD8+T")
+p1 <- FeaturePlot(cd8, c("Bcl11b"), split.by = "group")
+p2 <- VlnPlot(cd8, c("Bcl11b"), split.by = "group", group.by = "cell_name")
+
+# 使用patchwork将两张图放在一起
+(p1 + p2) + plot_layout(ncol = 2)
+
+pdf("./T_cell/figure/Cd8_Bcl11b.pdf")
+CombinePlots(plots = list(p1, p2),nrow = 2)
+dev.off()
+
+DimPlot(T_cell_sub,split.by = "group",group.by = "cell_name",label = T)
+
+
+
+trm <- subset(T_cell_sub,subset = cell_name == "Trm")
+VlnPlot(trm,c("Tcf1"),split.by = "group")
+
+```
+
+```{r}
+T_cell_sub <- SetIdent(T_cell_sub,value = "cell_name")
+marker <- FindAllMarkers(T_cell_sub)
+
+adnt.marker <- marker %>%
+  filter(cluster == "aDNT")
+
+adnt.gene.up <- adnt.marker[adnt.marker$avg_log2FC >=0.5& adnt.marker$p_val_adj <=0.05,]$gene
+
+## 上一步差异分析得到差异基因列表deg后取出，p值和log2FC
+nrDEG = adnt.up.marker[,c('avg_log2FC', 'p_val',"gene")]
+colnames(nrDEG)=c('log2FoldChange','pvalue',"gene") ##更改列名
+library(org.Hs.eg.db)
+library(clusterProfiler)
+## 把SYMBOL转换为ENTREZID，可能有部分丢失
+gene <- bitr(nrDEG$gene,     
+             fromType = "SYMBOL",     
+             toType =  "ENTREZID",    
+             OrgDb = org.Mm.eg.db)
+## 基因名、ENTREZID、logFC一一对应起来
+gene$logFC <- nrDEG$log2FoldChange[match(gene$SYMBOL,nrDEG$gene)]
+## 构建genelist
+geneList=gene$logFC
+names(geneList)=gene$ENTREZID 
+geneList=sort(geneList,decreasing = T) # 降序，按照logFC的值来排序
+## GSEA分析
+kk_gse <- gseKEGG(geneList     = geneList,
+                  organism     = 'mmu',
+                  minGSSize    = 10,
+                  pvalueCutoff = 0.9,
+                  verbose      = FALSE)
+kk_gse=DOSE::setReadable(kk_gse, OrgDb='org.Mm.eg.db',keyType='ENTREZID')
+sortkk<-kk_gse[order(kk_gse$enrichmentScore, decreasing = T),]
+
+library(enrichplot)
+pdf("./T_cell/figure/aDNT_transendothelial_migration.pdf")
+gseaplot2(kk_gse, 
+          "mmu04670", 
+          color = "firebrick",
+          rel_heights=c(1, .2, .6),
+          title = "Leukocyte transendothelial migration")
+dev.off()
+
+VlnPlot(adnt,c("Cd69","Bcl2","Epcam","Dsp","Ctnna1","Lgals1","Sdc1","Tnfsf6"),split.by = "group",stack = T,flip = T)
+
+VlnPlot(ndnt,c("Cd69","Bcl2","Epcam","Dsp","Ctnna1","Lgals1","Sdc1","Fas","Tnfrsf6b"),split.by = "group",stack = T,flip = T)
+
+
+```
+
+
+#间充质细胞
+```{r}
+Mesenchymal_sub <- readRDS("./Mesenchymal_cell/data/Mesenchymal_sub_data.rds")
+data <- Mesenchymal_sub
+table(Mesenchymal_sub@meta.data$cell_name)
+
+#tsne分组图
+tiff("./Mesenchymal_cell/figure/Mesenchymal_cell_tsne_plot_by_group.tiff",width = 12,height = 6,res = 300,units = "in")
+DimPlot(Mesenchymal_sub,label = T,group.by = "cell_name",split.by = "group",cols = cols_1,reduction = "tsne")+labs(title = element_blank())
+dev.off()
+
+Mesenchymal_sub <- SetIdent(Mesenchymal_sub,value = "cell_name")
+VlnPlot(Mesenchymal_sub,c("Pdgfra","Nrg1","Rspo3","Wnt5a","Adamdec1"),
+        stack = T,flip = T,split.by = "group")
+
+
+
+VlnPlot(Mesenchymal_sub,c("Sfrp1","Frzb"),
+        stack = T,flip = T,split.by = "group")
+
+
+VlnPlot(nsmc_T,c("Ccl11","Pik3cd","Akt1","Mapk13"),
+        stack = T,flip = T,split.by = "group")
+
+VlnPlot(nsmc,c("Pi16","Col15a1","Dpt","Ddr2"),split.by = "group",group.by = "cell_name",stack = T,flip = T)
+```
+
+
+
+```{r}
+#合并T细胞和nsmc
+nsmc <- subset(Mesenchymal_sub,subset = cell_name %in% setdiff(unique(Mesenchymal_sub@meta.data$cell_name),c("arterial SMC","interstitial SMC","visceral SMC")))
+T_cell_sub <- readRDS("./T_cell/data/T_cell_sub.rds")
+nsmc_T <- merge(nsmc, y = T_cell_sub)
+
+View(nsmc_T@meta.data)
+table(nsmc_T@meta.data$cell_name)
+```
+
+
+```{r}
+tiff("./Mesenchymal_cell/figure/Vlnplot_distinguish_proportion.tiff",units = "in",res = 300,width = 7,height = 7)
+VlnPlot(Mesenchymal_sub,c("Pdgfra","Pdpn","Cd34","Col14a1",#整体鉴别CF
+                          "Cd81","Pi16","Igf1","Cd55","C3",#cCF2
+                          "Sfrp1","Col15a1","Ptgs2","Wnt4",#cCF1
+                          "Tnc","Procr","Bmp2","Wnt5a","Nrg1",#CTF
+                          "Des","Vim","Acta2"), #myofibrolast
+        stack = T,flip = T,split.by = "group")
+dev.off()
+
+TSNEPlot(Mesenchymal_sub,label = T,group.by = "cell_name")
+
+VlnPlot(Mesenchymal_sub,c("Col6a1","Eng"),
+        stack = T,flip = T,split.by = "group")
+```
+
+
+##间充质通路
+```{r}
+wnt.gene <- c("Csnk1g2","Gpc5","Csnk1d","Kank1","Lgr4","Lmx1a","D1Pas1","Abl1","Abl2","Macf1","Prdm15","Adnp","Xiap","Arntl","Atp6v0c","Bmp2","Aspm","Cav1","Cdh3","Col1a1","Dab2","Dapk3","Ddx3x","Dlx5","Eda","Egf","Egfr","Ankrd6","Lgr5","Fgf10","Fgf2","Fgf9","Fgfr2","Fgfr3","Frat1","Fzd9","Gpc3","Hhex","Ilk","Jrk","Lef1","Smad3","Mbd2","Usp34","Nfkb1","Ppm1a","Ppm1b","Rspo1","Rbpj","Rps12","Sfrp2","Sema5a","Sfrp1","Sfrp4","Shh","Smarca4","Sox4","Spin1","Src","Cdc73","Csnk1g1","Nle1","Tert","Tgfb1","Thra","Depdc1b","Ccar2","Tnfaip3","Tnks","Ube2b","Ccn4","Wnt10b","Wnt3","Wnt3a","Wnt5a","Yap1","Rspo4","Pbxip1","Wnk1","Caprin2","Ppm1n","Lrrk1","Ppp2r3a","Rspo2","Pin1","Sulf1","Tlr2","Zeb2","Pin1rt1","Disc1","Map3k1","Ror2","Vcp","Csnk1e","Peg12","Tmem198","Lypd6","Lgr6","Dixdc1","Zranb1","Reck","Ruvbl1","Dkk2","Sall1","Crbn","Dact1","Gprc5b","Scel","Vps35","Tmem9","Lrrk2","Rnf220","Gskip","Nrarp","Ctdnep1","Bambi","Rnf146","Wls","Trpm4","Atp6v1c2","Plekha4","Mllt3","Csnk1g3","Atp6ap2","Ubr5","Ptk7","Sulf2","Zbed3","Amer1","Rspo3","Ttc21b","Tnks2","Usp47","Wnk2","Gid8","Daam2","Fam53b","Adgra2","Tbl1xr1","Usp8","Nkd1","Tmem132a")
+data <- AddModuleScore(object = data, features = list(wnt.gene), name = "Wnt")
+data@meta.data <- data@meta.data %>%
+  rename(Wnt = Wnt1)
+VlnPlot(object = data, features = "Wnt", group.by = "cell_name",split.by = "group",pt.size = 0)
+View(data@meta.data)
+
+apoptosis.gene <- c("Prdm11","Apc","Api5","Bak1","Bcl10","Bid","Bcl2l11","Btg1","Casp12","Casp3","Casp7","Casp9","Socs1","Gas6","Bbc3","Men1","Pik3ca","Sfrp1","Trp53","Trp63","Cfdp1","Cul3","Pik3cg","Nupr1","Xrcc2","Pmaip1","Ier3ip1","Chd8","Ddias","Sirt1","Stk17b")
+data <- AddModuleScore(object = data, features = list(apoptosis.gene), name = "apoptosis")
+data@meta.data <- data@meta.data %>%
+  rename(apoptosis = apoptosis1)
+VlnPlot(object = data, features = "apoptosis", group.by = "cell_name",split.by = "group",pt.size = 0)
+
+
+egf.gene <- c("Egfr","Egfr","Shc1","Stat1","","","Pik3r1","Stat5a","Stat1","Csnk2a1","Egfr","Elk1","Grb2","Hras","Pik3ca","Prkcb","Map2k1","Map2k4","Sos1","Csnk2a2","Egf","Fos","Jun","Prkca","Stat3","Map3k1","Mapk3","Mapk8","Srf","Plcg1","Raf1","Rasa1","Jak1")
+data <- AddModuleScore(object = data, features = list(egf.gene), name = "egf")
+data@meta.data <- data@meta.data %>%
+  rename(egf = egf1)
+VlnPlot(object = data, features = "egf", group.by = "cell_name",split.by = "group",pt.size = 0)
+
+notch.gene <- c("Rita1","Dlk2","Ovol2","Arrb1","Adam10","Bcl6","Bmp7","Cbfa2t2","Dlk1","Dll1","Dll3","Dlx1","Dlx2","Epn2","Eya1","Pofut1","Bmp2k","Fgf10","Dtx1","Gas2","Gata2","Gata5","Gsx2","Hes1","Hes5","Hey1","Hey2","Il6st","Itgb1bp1","Jag1","Jag2","Kit","Lfng","Llgl1","Zbtb7a","Ascl1","Cd46","Mesp1","Mfng","Mmp14","Neurl1a","Nfkbia","Notch1","Notch4","Ccn3","Numb","Dicer1","Rbpj","Rfng","Robo1","Sox2","Src","Stat3","Nepro","Arrdc1","Llgl2","Tgfb2","Trp63","Wnt1","Poglut1","Yap1","Slc35c1","Slc35c2","Galnt11","Gdpd5","Synj2bp","Prag1","Tspear","Nod2","Robo2","Aak1","Hif1an","Bend6","Zmiz1","Kctd10","Egfl7","Postn","Ccnc","Tspan14","Reck","Cntn6","Dll4","Tspan5","Pdcd10","Nrarp","Chac1","Tcim","Enho","Tspan15","Rian")
+data <- AddModuleScore(object = data, features = list(notch.gene), name = "notch")
+data@meta.data <- data@meta.data %>%
+  rename(notch = notch1)
+VlnPlot(object = data, features = "notch", group.by = "cell_name",split.by = "group",pt.size = 0)
+
+bmp.gene <- c("Numa1","Pelo","Abl1","Acvrl1","Bmp4","Gdf2","Bmpr2","Cav1","Cdh5","Cer1","Chrd","Dkk1","Dlx1","Eng","Fbn1","Fkbp8","Fst","Fstl1","Fzd1","Gata4","Gata6","Gdf3","Gdf5","Lrp2","Gpc3","Hes1","Hes5","Foxd1","Hipk2","Hoxa13","Ccn1","Ilk","Itga3","Kdr","Smad2","Smad4","Smad6","Smad7","Msx1","Msx2","Nbl1","Neo1","Nog","Notch1","Notch2","Pparg","Ppm1a","Rbpj","Sfrp2","Sfrp1","Sfrp4","Ski","Skil","Sorl1","Sox11","Skor1","Fstl5","Tcf7l2","Tfap2b","Ube2o","Tgfbr3","Tnfaip6","Tob1","Wnt1","Wnt5a","Lemd2","Rnf165","Spg20","Elapor2","Dand5","Grem1","Grem2","Sulf1","Crb2","Rgma","Scube3","Vwc2","Fstl4","Vwc2l","Ctdspl2","Kcp","Lemd3","Crim1","Sfrp5","Htra1","Tbx20","Twsg1","Sostdc1","Smurf2","Skor2","Bambi","Fbxl15","Tmem53","Chrdl2","Hjv","Tmprss6","Nanog","Bmper","Mir675","Vsir","Sost","Smurf1","Htra3","Chrdl1","Fstl3","Trim33","Zfp4233")
+data <- AddModuleScore(object = data, features = list(bmp.gene), name = "bmp")
+data@meta.data <- data@meta.data %>%
+  rename(bmp = bmp1)
+VlnPlot(object = data, features = "bmp", group.by = "cell_name",split.by = "group",pt.size = 0)
+
+
+
+
+
+
+```
+
+```{r}
+data_long <- data@meta.data %>%
+  select(cell_name, group,Wnt,apoptosis,egf,notch,bmp) %>%
+  pivot_longer(cols = c(Wnt,apoptosis,egf,notch,bmp),
+               names_to = "Score_Type", values_to = "Score_Value")
+
+ggplot(data_long, aes(x = group, y = Score_Value, fill = group)) + 
+  geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+  facet_grid(Score_Type ~ cell_name, scales = "free", space = "free") + 
+  theme_minimal() +
+  labs(title = "Intestine Relative pathways about population shrink",
+       x = "Group",
+       y = "Score Value")
+```
+
+##cCF1/2对比
+```{r}
+
+Mesenchymal_sub <- SetIdent(Mesenchymal_sub,value = "cell_name")
+
+cf.diff <- FindMarkers(Mesenchymal_sub,ident.1 = "cCF2",ident.2 = "cCF1")
+
+
+cf.diff.res <- expr_and_go_kegg(cf.diff,log2(1.5),log2(0.5))
+
+View(as.data.frame(cf.diff.res$up.go.data))
+
+list1 <- as.data.frame(cf.diff.res$up.go.data) %>%
+  dplyr::filter(ID %in% c("GO:0030198",	"GO:0045229","GO:0002685","GO:0050900","GO:0050727","GO:2000146","GO:0050678"))
+
+group_names <- c("cCF2","cCF1")
+
+plot.res <- plot_enrichment_results(list(list1,as.data.frame(cf.diff.res$down.go.data)),
+                                    group_names,n = 7)
+
+tiff("./Mesenchymal_cell/figure/cCF1_cCF2_dotplot.tiff",res = 300,units = "in",width = 7,height = 7)
+plot.res$plot
+dev.off()
+```
+
+
+
+
+
+
+
+
+
+#肠道上皮
+
+```{r}
+enterocyte_all <- readRDS("./all_enterocyte/data/enterocyte_all.rds")
+
+write.csv(t(as.matrix(enterocyte_all@assays$RNA@counts)),file = "./pyscenic/pydata_1000.csv")
+
+Colon_sub <- readRDS("./Colon_sub/data/Colon_sub_data.rds")
+
+table(enterocyte_all@meta.data$cell_name)
+
+data <- subset(enterocyte_all , subset = cell_name %in% c("Tmigd1-","Tmigd1+","TA","stem"))
+
+tiff("./all_enterocyte/figure/Tmigd1+_cell_Isg15_RIG_I_pathway.tiff",res = 300,units = "in",width = 5,height = 3)
+VlnPlot(data,c("Isg15"),split.by = "group",pt.size = 0,cols = cols_1)
+dev.off()
+```
+
+
+```{r}
+enterocyte_all <- readRDS("./all_enterocyte/data/enterocyte_all.rds")
+table(enterocyte_all@meta.data$cell_name)
+
+cell_names <- unique(enterocyte_all@meta.data$cell_name)
+cell_names <- cell_names[c(8,10,9,1,7,5,4,6,2,3)]
+
+enterocyte_all@meta.data$cell_name <- factor(enterocyte_all@meta.data$cell_name,levels = c(cell_names))
+
+
+#分组降维图
+pdf("./all_enterocyte/figure/dimplot_divided.pdf",width = 15)
+DimPlot(enterocyte_all,split.by = "group",label = F,group.by = "cell_type")
+dev.off()
+
+
+```
+##细胞数量
+```{r}
+# 1. 提取meta.data
+metadata <- enterocyte_all@meta.data
+# 2. 计算每组中cell_name的数量
+count_data <- metadata %>%
+  group_by(group, cell_name) %>%
+  summarise(count = n())
+# 3. 计算每个组中cell_name的百分比
+total_by_group <- metadata %>% group_by(group) %>% summarise(total = n())
+percent_data <- left_join(count_data, total_by_group, by="group")
+percent_data$percentage <- (percent_data$count / percent_data$total) * 100
+
+
+percent_data$cell_name <- factor(percent_data$cell_name,levels = c(cell_names))
+# 4. 使用ggplot2绘制柱状图
+cell_names <- unique(metadata$cell_name)
+
+# 绘制数量的柱状图
+ggplot(count_data, aes(x=group, y=count, fill=cell_name)) +
+  geom_bar(stat="identity", position="stack") +
+  labs(title="Number of cells per cell_name by group") +
+  ylab("Number of cells") +
+  xlab("Group")
+  
+ggplot(percent_data, aes(x=group, y=percentage, fill=cell_name)) +
+  geom_bar(stat="identity", position="stack") +
+  scale_fill_manual(values = setNames(cols_1, cell_names)) +
+  labs(title="Percentage of cells per cell_name by group") +
+  ylab("Percentage") +
+  xlab("Group")
+ggsave("./all_enterocyte/figure/enterocyte_all_subgroup.pdf",width = 5,height = 8)
+```
+##折线图
+```{r}
+grouped_metadata <- metadata %>%
+  group_by(group, cell_type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(group) %>%
+  mutate(freq = n / sum(n))
+
+# 针对每个细胞类型计算24h和Control，48h和24h的变化比例
+change_ratio <- grouped_metadata %>%
+  group_by(cell_type) %>%
+  summarise(`24h_vs_Control` = (freq[group == "24h"] - freq[group == "Control"]) / freq[group == "Control"],
+            `48h_vs_24h` = (freq[group == "48h"] - freq[group == "24h"]) / freq[group == "24h"], .groups = "drop") %>%
+  mutate(Control = c(0)) %>%
+  select("cell_type","Control","24h_vs_Control","48h_vs_24h")
+write.xlsx(change_ratio,file = "./all_enterocyte/figure/proportion_change_ratio.xlsx")
+
+# 将Control列的值设置为1
+change_ratio$Control <- 1
+
+# 计算24h组的相对值
+change_ratio$`24h` <- change_ratio$Control * (1 + change_ratio$`24h_vs_Control`)
+
+# 计算48h组的相对值
+change_ratio$`48h` <- change_ratio$`24h` * (1 + change_ratio$`48h_vs_24h`)
+
+order_cells <- change_ratio %>%
+  arrange(-`48h`) %>%
+  pull(cell_type)
+
+change_ratio$cell_type <- factor(change_ratio$cell_type, levels = order_cells)
+
+change_ratio_long <- change_ratio %>%
+  select(cell_type, Control, `24h`, `48h`) %>%
+  gather(key = "timepoint", value = "relative_value", -cell_type)
+
+# 设置timepoint的因子级别
+change_ratio_long$timepoint <- factor(change_ratio_long$timepoint, levels = c("Control", "24h", "48h"))
+
+ggplot(change_ratio_long, aes(x = timepoint, y = relative_value, group = cell_type, color = cell_type)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  theme_minimal() +
+  scale_color_manual(values = cols_1)+
+  labs(y = "Relative Cell Count", x = "Timepoint", title = "Change in Cell Count Over Time") 
+ggsave("./all_enterocyte/figure/enterocyte_change_line_chart.pdf")
+```
+
+##细胞定义vlnplot
+```{r}
+pdf("./all_enterocyte/figure/markers_enterocyte.pdf",height = 12)
+VlnPlot(enterocyte_all,c("Wfdc2","Fgfbp1","Maoa","Sult1b1",
+                         "Chga",
+                         "Muc2","Tff3","Spdef",
+                         "Mki67","Cenpf",
+                         "Dclk1"),
+        stack = T,flip = T,group.by = "cell_type")
+dev.off()
+
+
+table(enterocyte_all@meta.data$cell_name)
+
+enterocyte_all <- SetIdent(enterocyte_all,value = "cell_name")
+DimPlot(enterocyte_all,group.by = "cell_name",label = T)
+
+enterocyte.marker <- FindAllMarkers(enterocyte_all)
+
+op5_genes_per_cell_name <- enterocyte.marker %>% group_by(cluster) %>% top_n(5, avg_log2FC)
+genes_to_plot <- top5_genes_per_cell_name$gene
+
+cell_names <- unique((enterocyte_all@meta.data$cell_name))
+cell_names <- cell_names[c(6,2,3,4,7,1,5,9,10,8)]
+
+enterocyte_all$cell_name <- factor(enterocyte_all$cell_name, levels = cell_names)
+enterocyte_all <- SetIdent(enterocyte_all, value = "cell_name")
+
+DoHeatmap(enterocyte_all, features = genes_to_plot)
+ggsave("./all_enterocyte/figure/heatmap.tiff",dpi = 300,width = 15,height = 10)
+```
+
+###colonocyte
+```{r}
+DimPlot(Colon_sub)
+
+table(Colon_sub@meta.data$cell_name)
+
+#干细胞
+pdf("./all_enterocyte/figure/stem_cell_vlnplot.pdf")
+VlnPlot(Colon_sub,c("Lgr5","Agr2","Hmgcs2","Ascl2"),
+        stack = T,flip = T)
+dev.off()
+
+#结肠细胞
+
+VlnPlot(Colon_sub,c("Wfdc2","Fgfbp1","Maoa","Sult1b1",
+                    "Krt20","Ezr","Selenbp1","Cyp2c55","Car1","Tmigd1",
+                    "Slfn4","Irf7"),
+        stack = T,flip = T)
+
+RidgePlot(Colon_sub,"Tmigd1")
+
+FeaturePlot(Colon_sub,c("Irf7","Cyp2c55"),blend = T)
+
+FeaturePlot()
+```
+
+```{r}
+#Tmigd1 kegg go富集分析
+Colon_sub <- SetIdent(Colon_sub,value = "cell_name")
+colon_res <- FindMarkers(Colon_sub,ident.1 = "Tmigd1+",ident.2 = "Tmigd1-")
+
+plot_rse <- expr_and_go_kegg(colon_res,1,-1)
+
+
+plot_rse$figure.kegg+
+  plot_rse$figure.go
+ggsave("./all_enterocyte/figure/Tmigd1_splited_go_kegg_enrichment.pdf",width = 20)
+```
+```{r}
+colon_res <- FindMarkers(Colon_sub,ident.1 = "Tmigd1+",ident.2 = "Tmigd1-")
+nrDEG = colon_res[,c('avg_log2FC', 'p_val_adj')]
+colnames(nrDEG)=c('log2FoldChange','pvalue') ##更改列名
+library(org.Hs.eg.db)
+library(clusterProfiler)
+## 把SYMBOL转换为ENTREZID，可能有部分丢失
+gene <- bitr(rownames(nrDEG),     
+             fromType = "SYMBOL",     
+             toType =  "ENTREZID",    
+             OrgDb = org.Mm.eg.db)
+## 基因名、ENTREZID、logFC一一对应起来
+gene$logFC <- nrDEG$log2FoldChange[match(gene$SYMBOL,rownames(nrDEG))]
+## 构建genelist
+geneList=gene$logFC
+names(geneList)=gene$ENTREZID 
+geneList=sort(geneList,decreasing = T) # 降序，按照logFC的值来排序
+## GSEA分析
+kk_gse <- gseKEGG(geneList     = geneList,
+                  organism     = 'mmu',
+                  minGSSize    = 10,
+                  pvalueCutoff = 0.9,
+                  verbose      = FALSE)
+kk_gse=DOSE::setReadable(kk_gse, OrgDb='org.Mm.eg.db',keyType='ENTREZID')
+sortkk<-kk_gse[order(kk_gse$enrichmentScore, decreasing = T),]
+
+library(enrichplot)
+par(2,1)
+gseaplot2(kk_gse, 
+          c("mmu04622"), 
+          color = "firebrick",
+          rel_heights=c(1, .2, .6),
+          xlab("RIG-I-like receptor signaling pathway"))
+ggsave("./all_enterocyte/figure/RIG_I_like_signal_Tmigd1+.tiff",dpi = 300)
+
+Tmigd1.pos <- revert_gene(Colon_sub,"Tmigd1+",0.5)
+Tmigd1.pos$up
+
+```
+
+```{r}
+enterocyte_all <- readRDS("./all_enterocyte/data/enterocyte_all.rds")
+
+res.marker <- FindMarkers(enterocyte_all,ident.1 = "Tmigd1+",ident.2 = "Tmigd1-")
+
+tmi.res <- expr_and_go_kegg(res.marker)
+
+tmi.res$figure.kegg
+
+tmi.up <- as.data.frame(tmi.res$up.go.data) %>%
+  dplyr::slice(1:6) %>%
+  mutate(group = "Tmigd1+")
+tmi.down <- as.data.frame(tmi.res$down.go.data) %>%
+  dplyr::slice(1:6) %>%
+  mutate(group = "Tmigd1-")
+
+tim.plot.data <- rbind(tmi.up,tmi.down)
+
+tim.plot.data$GeneRatio <- as.numeric(gsub("/.*", "", tim.plot.data$GeneRatio))
+tim.plot.data$Count <- as.numeric(tim.plot.data$Count)
+
+# 使用ggplot2创建点图
+p <- ggplot(tim.plot.data, aes(x = group, y = reorder(Description, GeneRatio), size = GeneRatio, color = -log10(pvalue))) +
+  geom_point(alpha = 0.6) +
+  scale_color_gradient(low = "#2f4e87", high = "#af2934") +
+  theme_minimal() +
+  labs(title = "", x = "", y = "GO term", size = "Gene Count", color = "-log10(pvalue)") +
+  theme(legend.position = "right")
+
+tiff("./all_enterocyte/figure/Tmigd1_go_enrichment.tiff",units = "in",res = 300,width = 6,height = 7)
+print(p)
+dev.off()
+
+tiff("./all_enterocyte/figure/dimplot_enterocyte_all.tiff",units = "in",res = 300,width = 6,height = 5)
+DimPlot(enterocyte_all,group.by = "cell_type",cols = c("#e5ce81","#f47720","#459943","#bdc3d2",
+        "#606f8a","#ea9c9d"))
+dev.off()
+```
+
+
+```{r}
+Tmigd1 <- subset(Colon_sub,subset = cell_name == "Tmigd1+")
+
+obj <- FindVariableFeatures(Tmigd1, nfeatures=3000)
+gene.use <- VariableFeatures(obj)
+
+ave <- AverageExpression(obj, group.by = "group", assays=c("RNA"), features=gene.use)
+
+ingene <- ave$RNA
+gene_tpm <- data.matrix(ingene)
+
+#Mfuzz 用的数据格式
+eset <- new("ExpressionSet", exprs = gene_tpm)
+
+cm <- clusterData(exp = eset,
+                  cluster.method = "mfuzz",
+                  cluster.num = 9)
+
+visCluster(cm,plot.type = "line",ncol = 3)+xlab("Mfuzz result of Tmidg1+")
+ggsave("./all_enterocyte/figure/Mfuzz_Tmigd1.tiff",dpi = 300,width = 12,height = 12)
+
+View(cm$wide.res)
+
+intersect(cm$wide.res[cm$wide.res$cluster == 5,]$gene,Tmigd1.pos$up_down)
+
+par(c(2,1))
+dotplot(
+  enrichGO(
+    gene = cm$wide.res[cm$wide.res$cluster == 1,]$gene,
+    OrgDb = org.Mm.eg.db,
+    keyType = "SYMBOL",
+    ont = "BP"
+  ))+labs(x = "cluster1 of Mfuzz results")
+dotplot(
+  enrichGO(
+    gene = cm$wide.res[cm$wide.res$cluster == 8,]$gene,
+    OrgDb = org.Mm.eg.db,
+    keyType = "SYMBOL",
+    ont = "BP"))+labs(x = "cluster9 of Mfuzz results")
+
+
+
+#2ncRNA等合成相关
+#4 代谢相关
+#
+
+
+```
+
+```{r}
+Colon_sub <- readRDS("./Colon_sub/data/Colon_sub_data.rds")
+
+VlnPlot(Colon_sub,c("Irf7","Slfn4","Tmigd1","Lgr5"),stack = T,flip = T)
+
+tiff("./all_enterocyte/figure/Irf7_Slfn4_blend_fetureplot.tiff",res = 300,units = "in",width = 10,height = 3)
+FeaturePlot(Colon_sub,c("Irf7","Slfn4"),blend = T,cols = c("#bdc3d2","#f47720","#3ba889"))
+dev.off()
+
+p1 <- FeaturePlot(Colon_sub,c("Tmigd1"),label = T,cols = c("grey","#982b2b"))
+p2 <- VlnPlot(Colon_sub,c("Tmigd1"),cols = cols_1)+labs(title = element_blank())
+tiff("./all_enterocyte/figure/Tmigd1_feature_vlnplot.tiff",units = "in",res = 300,height = 5,width = 5)
+p1 + p2
+dev.off()
+```
+
+
+```{r}
+library(ClusterGVis)
+
+enterocyte_all <- SetIdent(enterocyte_all,value = "cell_name")
+
+enterocyte_all.marker <- FindAllMarkers(enterocyte_all,
+                                        only.pos = T,
+                                        min.pct = 0.25,
+                                        logfc.threshold = 0.25)
+
+pbmc.markers <- enterocyte_all.marker %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(n = 20, wt = avg_log2FC)
+
+st.data <- prepareDataFromscRNA(object = enterocyte_all,
+                                diffData = pbmc.markers,
+                                showAverage = TRUE)
+
+enrich <- enrichCluster(object = st.data,
+                        OrgDb = org.Mm.eg.db,
+                        type = "BP",
+                        organism = "mmu",
+                        pvalueCutoff = 0.5,
+                        topn = 5,
+                        seed = 5201314)
+
+# add gene name
+markGenes = unique(pbmc.markers$gene)[sample(1:length(unique(pbmc.markers$gene)),40,
+                                             replace = F)]
+
+# line plot
+visCluster(object = st.data,
+           plot.type = "line")
+
+
+visCluster(object = st.data,
+           plot.type = "heatmap",
+           column_names_rot = 50,
+           markGenes = markGenes,
+           cluster.order = c(1:10))
+
+st.data$wide.res <- st.data$wide.res %>%
+  dplyr::select(c(1,3,4,7,5,10,8,2,6,9,11),everything())
+
+
+tiff("./all_enterocyte/figure/heatmap_clusterGVis.tiff",width = 20, height = 15, units = "in", res = 300)
+visCluster(object = st.data,
+           plot.type = "both",
+           column_names_rot = 45,
+           show_row_dend = F,
+           markGenes = markGenes,
+           markGenes.side = "left",
+           annoTerm.data = enrich,
+           line.side = "left",
+           cluster.order = c(2,3,6,4,9,7,1,5,8,10),
+           go.col = rep(jjAnno::useMyCol("stallion",n = 10),each = 5),
+           add.bar = T)
+dev.off()
+
+
+
+```
+
+
+
+###goblet
+```{r}
+
+DimPlot(enterocyte_all,group.by = "cell_type")
+
+
+goblet_cell <- readRDS("./all_enterocyte/data/goblet_cell_withpor.rds")
+
+goblet_cell <- SetIdent(goblet_cell,value = "cell_name")
+
+goblet_cell@meta.data[goblet_cell@meta.data$seurat_clusters == 7,]$cell_name <- "Sytl2- GCs"
+
+
+
+tiff("./all_enterocyte/figure/goblet_pseudotiem_with_dimplot.tiff",res = 300,units = "in",width = 12,height = 5)
+DimPlot(goblet_cell,label = T,cols = cols_1)+
+  plot_cells(cds,color_cells_by = "pseudotime",label_branch_points = F,label_leaves = F)
+dev.off()
+```
+
+```{r}
+table(goblet_cell@meta.data$cell_name)
+goblet_cell <- SetIdent(goblet_cell,value = "cell_name")
+res <- FindMarkers(goblet_cell,ident.1 = "Sytl2- GCs")
+
+res_plot <- expr_and_go_kegg(res,up_threshold = log2(1.5),log2(0.7))
+
+lidata <- list(as.data.frame(res_plot$up.go.data),as.data.frame(res_plot$down.go.data))
+
+# View(as.data.frame(res_plot$up.go.data))
+
+plot_data <- plot_enrichment_results(lidata,c("Sytl2- GCs","Other GCs"),n=7)
+ 
+
+barplot(res_plot$up.go.data)
+library(ggplot2)
+
+ggplot(data = res_plot$up.go.result,aes(x = -log10(p.adjust), y = Description)) +
+  geom_bar(stat = "identity")
+
+tiff("../figure/Fig. 4/Figure. 4l.tiff",res = 300,height = 4,width = 6,units = "in")
+plot_data$plot
+dev.off()
+
+tiff("../figure/Fig. 4/Figure. 4l.tiff",res = 300,height = 5,width = 7,units = "in")
+dotplot(res_plot$up.go.data,showCategory = 6)
+dev.off()
+```
+
+
+```{r}
+
+goblet_cell <- SetIdent(goblet_cell,value = "seurat_clusters")
+
+
+#哨兵GCs sentinel GCs 6 10 
+VlnPlot(goblet_cell,c("Il18","Nlrp6"),
+        stack = T,flip = T)
+
+VlnPlot(goblet_cell,c("Clca1","Fcgbp", #0 2 3 7
+                     "Dmbt1","Gsdmc4", #5
+                      "Mxd1", # 3 5 7
+                      "Sytl2","Muc2",#1 6
+                     "Mki67"), 
+        stack = T,flip = T)
+
+VlnPlot(goblet_cell,c("Mki67",# 6
+                    "Clca1","Fcgbp", # 4 7
+                     "Dmbt1","Gsdmc4","Hes1", #1 2 3 5 9
+                      "Mxd1",
+                      "Sytl2","Muc2"),#0 8
+        stack = T,flip = T)
+
+res_1 <- FindMarkers(goblet_cell,ident.1 = c(7))
+res_1 <- res_1 %>% mutate(gene = rownames(res_1),value = pct.1 / pct.2)
+
+
+dotplot(
+  enrichGO(
+    gene = res_1[res_1$avg_log2FC >= 0.5 & res_1$p_val_adj <= 0.05,]$gene,
+    OrgDb = org.Mm.eg.db,
+    ont = "BP",
+    keyType = "SYMBOL"
+  )
+)
+
+
+FeaturePlot(goblet_cell,c("Mki67"),label = T)
+
+goblet_cell@meta.data <- goblet_cell@meta.data %>%
+  mutate(cell_name = case_when(
+    seurat_clusters %in% c(4,7) ~ "Typical GCs",
+    seurat_clusters %in% c(1,2,3,5,9) ~ "Nontypical GCs",
+    seurat_clusters == 6 ~ "Proliferative GCs",
+    seurat_clusters %in% c(0,8) ~ "Sytl2- GCs"
+  ),
+  cell_type = "Goblet")
+goblet_cell <-SetIdent(goblet_cell,value = "seurat_clusters")
+tiff("./all_enterocyte/figure/goblet_all_vlnplot.tiff",width = 5, height = 5, units = "in", res = 300)
+VlnPlot(goblet_cell,c("Clca1","Fcgbp", # 4 7
+                     "Dmbt1","Gsdmc4","Hes1", #1 2 3 5 9
+                      "Mxd1",
+                      "Sytl2","Muc2",#0 8  
+                      "Mki67"), # 6
+        stack = T,flip = T,cols = cols_1)
+dev.off()
+
+DimPlot(goblet_cell,label = T,group.by = "cell_name")
+
+RidgePlot(goblet_cell,c("Rab27b","Sytl2"),ncol = 2)
+
+
+
+```
+
+```{r}
+#goblet_with_pro的monocle3
+sam.name <- "all_enterocyte"
+file_head <- "goblet"
+cds_pt_res <- readRDS(paste0("./",sam.name,"/monocle/",file_head,"_cds_pt_res.rds"))
+cds <- readRDS("./all_enterocyte/monocle/goblet_cds.rds")
+
+Track_genes_sig <- cds_pt_res %>%
+  arrange(desc(morans_I)) %>% 
+  slice(1:10) %>%
+  pull(gene_short_name) %>% 
+  as.character()
+
+
+tiff("./all_enterocyte/figure/goblet_Track_genes.tiff",width = 20, height = 15, units = "in", res = 300)
+plot_genes_in_pseudotime(cds[Track_genes_sig,],color_cells_by="cell_name",min_expr = 0.5,ncol= 2)
+dev.off()
+```
+
+```{r}
+pGC <- revert_gene(goblet_cell,"Proliferative GCs",0.5)
+
+VlnPlot(enterocyte_all,c("Egfr","Erbb2"),
+        stack = T,flip = T,split.by = "group")
+
+RidgePlot(enterocyte_all,"Egfr")
+```
+
+```{r}
+ggsave(paste0(path,file_head,"/",file_head,"_Tmigd1-_EGF_24h_vs_control.tiff"),plot = p1,dpi = 300)
+```
+
+```{r}
+VlnPlot(enterocyte_all,c("Ugdh","Ugt1a6a","Ugt2b5","Hsd17b6"),stack = T,flip = T,split.by = "group",pt.size = 0)
+```
+
+
+#IF
+```{r}
+library(tidyverse)
+library(ggplot2)
+library(ggpubr)
+library(dplyr)
+```
+
+```{r}
+sif <- read_csv("../figure/IF/Sytl2_Results.csv")
+
+
+```
+
+```{r}
+# 假设你的数据已加载到一个名为sif的数据框中
+# 计算每组的均值和标准误
+sif_summary <- sif %>%
+  group_by(Label) %>%
+  summarise(
+    Mean = mean(Mean),
+    SE = sd(Mean) / sqrt(n())
+  )
+
+# 进行ANOVA检验
+anova_result <- aov(Mean ~ Label, data = sif)
+summary(anova_result)
+
+# 进行Tukey HSD事后检验
+tukey_result <- TukeyHSD(anova_result)
+print(tukey_result)
+
+# 将Tukey HSD的结果转换为数据框
+tukey_df <- as.data.frame(tukey_result$Label)
+tukey_df$Comparison <- rownames(tukey_df)
+rownames(tukey_df) <- NULL
+
+# 添加星号表示显著性
+tukey_df <- tukey_df %>%
+  mutate(star = case_when(
+    `p adj` < 0.001 ~ "***",
+    `p adj` < 0.01 ~ "**",
+    `p adj` < 0.05 ~ "*",
+    TRUE ~ "ns"
+  ))
+
+# 画柱状图，包括样本点和误差棒
+p <- ggplot(data = sif, aes(x = Label, y = Mean)) +
+  geom_bar(stat = "summary", fun = "mean", fill = "skyblue", color = "black", width = 0.7) +
+  geom_errorbar(data = sif_summary, aes(ymin = Mean - SE, ymax = Mean + SE), width = 0.2) +
+  geom_jitter(aes(color = Label), width = 0.2, size = 2) +
+  labs(title = "Immunofluorescence Intensity by Group",
+       x = "Group",
+       y = "Mean Intensity") +
+  theme_minimal()
+
+# 添加显著性标志
+p + geom_text(data = tukey_df, aes(label = star, x = Comparison, y = sif_summary$Mean + sif_summary$SE), vjust = -0.5)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+

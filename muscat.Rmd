@@ -1,0 +1,214 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(limma)
+library(muscat)
+library(purrr)
+library(SingleCellExperiment)
+library(scater)
+library(sctransform)
+library(statmod)
+library(UpSetR)
+```
+
+
+```{r}
+Mesenchymal_sub <- readRDS("./Mesenchymal_cell/data/Mesenchymal_sub_data.rds")
+```
+
+```{r}
+# 从Seurat对象中提取表达矩阵和元数据
+exprs <- Mesenchymal_sub@assays$RNA@counts
+meta_data <- Mesenchymal_sub@meta.data
+
+meta_data <- meta_data %>%
+  mutate(group = case_when(group == "24h" ~ "h24",
+                           group == "48h" ~ "h48",
+                           T ~ group))
+
+# 创建SingleCellExperiment对象
+sce <- SingleCellExperiment(assays = list(counts = exprs), colData = meta_data)
+
+# 重命名sce对象的元数据列以满足muscat的要求
+colData(sce)$cluster_id <- colData(sce)$cell_name
+
+colData(sce)$group_id <- colData(sce)$group
+
+qc <- perCellQCMetrics(sce)
+
+ol <- isOutlier(metric = qc$detected, nmads = 2, log = TRUE)
+sce <- sce[, !ol]
+dim(sce)
+
+sce <- sce[rowSums(counts(sce) > 1) >= 10, ]
+dim(sce)
+
+sce <- computeLibraryFactors(sce)
+sce <- logNormCounts(sce)
+
+assays(sce)$vstresiduals <- vst(counts(sce), verbosity = FALSE)$y
+
+sce$id <- sce$stim
+
+sce <- prepSCE(sce, 
+    kid = "cell_name", # subpopulation assignments
+    gid = "group",  # group IDs (ctrl/stim)
+    sid = "id",   # sample IDs (ctrl/stim.1234)
+    drop = TRUE)
+
+nk <- length(kids <- levels(sce$cluster_id))
+ns <- length(sids <- levels(sce$sample_id))
+names(kids) <- kids
+names(sids) <- sids
+
+t(table(sce$cluster_id, sce$group_id))
+
+sce <- runUMAP(sce, pca = 20)
+sce <- runTSNE(sce,pca = 20)
+                                                                                      #接下来，定义了一个简单的包装函数.plot_dr()来美化降维图的输出。
+.plot_dr <- function(sce, dr, col)
+  plotReducedDim(sce, dimred = dr, colour_by = col) +
+    guides(fill = guide_legend(override.aes = list(alpha = 1, size = 3))) +
+theme_minimal() + theme(aspect.ratio = 1)
+# downsample to max. 100 cells per cluster
+cs_by_k <- split(colnames(sce), sce$cluster_id)
+cs100 <- unlist(sapply(cs_by_k, function(u) 
+  sample(u, min(length(u), 100))))
+# plot t-SNE & UMAP colored by cluster & group ID
+for (dr in c("TSNE", "UMAP")) {
+  for (col in c("cluster_id", "group_id")) {
+    print(.plot_dr(sce[, cs100], dr, col))
+  }
+}
+
+#使用aggregateData函数将数据聚合为伪批量数据。
+pb <- aggregateData(sce,
+                    assay = "counts", fun = "sum",
+                    by = c("cluster_id", "sample_id"))
+
+# one sheet per subpopulation
+assayNames(pb)
+# pseudobulks for 1st subpopulation
+t(head(assay(pb))) 
+
+# 将group_id从metadata复制到colData
+matched_group_id <- metadata(pb)$experiment_info$group_id[match(colnames(pb), metadata(pb)$experiment_info$sample_id)]
+colData(pb)$group_id <- matched_group_id
+
+
+
+#聚合信号的多维缩放（MDS）图
+pdf("./Mesenchymal_cell/figure/MDS_of_group_show_24h_outlier.pdf")
+(pb_mds <- pbMDS(pb))
+dev.off()
+
+```
+
+
+
+
+```{r}
+# run DS analysis
+res <- pbDS(pb, verbose = FALSE)
+# access results table for 1st comparison
+tbl <- res$table[[1]]
+# one data.frame per cluster
+names(tbl)
+# view results for 1st cluster
+k1 <- tbl[[1]]
+head(format(k1[, -ncol(k1)], digits = 2))
+
+
+# construct design & contrast matrix
+ei <- metadata(sce)$experiment_info
+mm <- model.matrix(~ group_id, data = ei)
+
+dimnames(mm) <- list(ei$sample_id, levels(ei$group_id))
+library(limma)
+contrast <- makeContrasts("h24-Control", levels = mm)
+# run DS analysis
+res <- pbDS(pb, design = mm, contrast = contrast)
+head(res$table[[1]])
+
+View(res)
+saveRDS(sce,"./Mesenchymal_cell/data/half_sce.rds")
+
+```
+
+```{r}
+# 1st approach
+mm <- mmDS(sce, method = "vst", vst = "sctransform",coef = "h24")
+
+tbl_fil <- lapply(tbl, function(u) {
+  u <- dplyr::filter(u, p_adj.loc < 0.05, abs(logFC) > 1)
+  dplyr::arrange(u, p_adj.loc)
+})
+
+n_de <- vapply(tbl_fil, nrow, numeric(1))
+p_de <- format(n_de / nrow(sce) * 100, digits = 3)
+data.frame("#DS" = n_de, "%DS" = p_de, check.names = FALSE)
+
+top2 <- bind_rows(lapply(tbl_fil, top_n, 2, p_adj.loc))
+format(top2[, -ncol(top2)], digits = 2)
+frq <- calcExprFreqs(sce, assay = "counts", th = 0)
+
+assayNames(frq)
+t(head(assay(frq), 5))
+
+gids <- levels(sce$group_id)
+frq10 <- vapply(as.list(assays(frq)), 
+  function(u) apply(u[, gids] > 0.1, 1, any), 
+  logical(nrow(sce)))
+t(head(frq10))
+
+tbl_fil2 <- lapply(kids, function(k)
+  dplyr::filter(tbl_fil[[k]], 
+    gene %in% names(which(frq10[, k]))))
+
+resDS(sce, res, bind = "row", frq = frq)
+
+resDS(sce, res, bind = "col", cpm = TRUE)
+
+resDS(sce, res, frq = TRUE)
+
+
+de_gs_by_k <- map(tbl_fil, "gene")
+upset(fromList(de_gs_by_k))
+
+top8 <- bind_rows(tbl_fil) %>% 
+  top_n(8, dplyr::desc(p_adj.loc)) %>% 
+  pull("gene")
+#这里使用dplyr包的函数来提取所有细胞群体中的前8个DS基因。
+ps <- lapply(top8, function(g)
+  .plot_dr(sce[, cs100], "TSNE", g) + 
+    ggtitle(g) + theme(legend.position = "none"))
+#对于top8中的每个基因，都会生成一个由该基因的表达着色的t-SNE图。
+cowplot::plot_grid(plotlist = ps, ncol = 4, align = "vh")#排列并显示图形
+
+plotExpression(sce[, sce$cluster_id == "B cells"],
+  features = tbl_fil$`B cells`$gene[seq_len(6)],
+  x = "sample_id", colour_by = "group_id", ncol = 3) +
+  guides(fill = guide_legend(override.aes = list(size = 5, alpha = 1))) +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+pbHeatmap(sce, res, top_n = 5)#展示每个细胞群体的前5个DS基因
+
+pbHeatmap(sce, res, k = "cCF1")#这里展示了B细胞群体的前20个DS基因。
+```
+
+
+
+Add a new chunk by clicking the *Insert Chunk* button on the toolbar or by pressing *Ctrl+Alt+I*.
+
+When you save the notebook, an HTML file containing the code and output will be saved alongside it (click the *Preview* button or press *Ctrl+Shift+K* to preview the HTML file).
+
+The preview shows you a rendered HTML copy of the contents of the editor. Consequently, unlike *Knit*, *Preview* does not run any R code chunks. Instead, the output of the chunk when it was last run in the editor is displayed.

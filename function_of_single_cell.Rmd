@@ -1,0 +1,1425 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+#颜色
+```{r}
+color_map_1 <- c(rgb(183,181,160,maxColorValue = 255),rgb(068,117,122,maxColorValue = 255),rgb(069,042,061,maxColorValue = 255),rgb(212,076,060,maxColorValue = 255),rgb(221,108,076,maxColorValue = 255),rgb(229,133,093,maxColorValue = 255),rgb(238,213,183,maxColorValue = 255),rgb(142,182,156,maxColorValue = 255))
+
+color_map_2 <- c(rgb(115, 186, 214, maxColorValue = 255), rgb(13, 76, 109, maxColorValue = 255), rgb(3, 50, 80, maxColorValue = 255), rgb(2, 39, 62, maxColorValue = 255), rgb(239, 65, 67, maxColorValue = 255), rgb(191, 30, 46, maxColorValue = 255), rgb(196, 50, 63, maxColorValue = 255)
+)
+
+cols_1 <-c("#88c4e8","#db6968","#982b2b","#0074b3",
+        "#e5ce81","#f47720","#459943","#bdc3d2",
+        "#606f8a","#ea9c9d")
+
+cols_2 <-c("#af2934","#ffe327","#2f4e87","#b0b9b8","#f0eedf",
+        "#aed4e9","#f4a69a","#3ba889","#4593c3","#f18e0c",
+        "#262a35","#c5942e","#a2a7ab")
+
+cols_3 <- c("#A3D2E2","#86C0CB","#5DA3AF","#C07A92")
+```
+
+
+#整体分析
+```{r}
+
+my_sc_flow <- function(sub_data,
+                       sam.name,
+                       file_head,
+                       dim.set = NULL,
+                       res.set = NULL) {
+  library(cowplot)
+  library(patchwork)
+  library(openxlsx)
+  library(ggplot2)
+  dir.create(sam.name)
+  dir.create(paste0("./",sam.name,"/data"))
+  sub_data <- NormalizeData(sub_data)
+  sub_data <- FindVariableFeatures(sub_data, 
+                                               selection.method = "vst",
+                                               nfeatures = 1000)
+  
+  sub_data <- ScaleData(sub_data)
+  
+  top10 <- head(x = VariableFeatures(sub_data), 10)
+  plot1 <- VariableFeaturePlot(sub_data)
+  plot2 <- LabelPoints(plot = plot1, points = top10)
+  pdf(file = paste0("./",sam.name,"/",file_head,"_Norm-feature_variableplot.pdf"),width = 12,height = 8)
+  g<-CombinePlots(plots = list(plot1, plot2),legend = "none")
+  print(g)
+  dev.off()
+  
+  # 运行 PCA
+  sub_data <- RunPCA(sub_data, 
+                            features = VariableFeatures(object = sub_data))
+  #PCA结果展示-1
+  pdf(paste0("./",sam.name,"/",file_head,"PCA-VizDimLoadings.pdf"),width = 7,height = 5)
+  g<-VizDimLoadings(sub_data, dims = 1:2, reduction = "pca")
+  print(g)
+  dev.off()
+  
+  #PCA结果展示-2
+  pdf(paste0("./",sam.name,"/",file_head,"_PCA-DimPlot.pdf"),width = 10,height = 8)
+  g<-DimPlot(sub_data, reduction = "pca")
+  print(g)
+  dev.off()
+  
+  #PCA结果展示-3
+  pdf(paste0("./",sam.name,"/",file_head,"_PCA-DimPlot_group.pdf"),width = 10,height = 8)
+  g<-DimPlot(sub_data, reduction = "pca",split.by = "group")
+  print(g)
+  dev.off()
+  
+  #PCA热图
+  pcadim <- 15
+  pdf(paste0("./",sam.name,"/",file_head,"_PCA-DimHeatmap_","pcadim=",pcadim,".pdf"),width = 10,height = 8)
+  g<-DimHeatmap(sub_data, dims = 1:pcadim, cells = 500, balanced = TRUE)
+  print(g)
+  dev.off()
+  
+  if(!is.null(dim.set)){
+    dim.use <- 1:dim.set
+  }else{
+    dim_val <- as.numeric(readline(prompt = "Please input max of dimension: ")) # 注意我将变量名从dim更改为dim_val
+    dim.use <- 1:dim_val
+  }
+
+  # 运行 t-SNE 或 UMAP 降维
+  sub_data <- RunTSNE(sub_data, dims = dim.use)
+  # 或者
+  sub_data <- RunUMAP(sub_data, dims = dim.use)
+  
+  if(!is.null(res.set)){
+    res <- res.set
+  }else{
+    res <- as.numeric(readline(prompt = "Please input resolution (res) value: "))
+  }
+
+  # 寻找聚类
+  sub_data <- FindNeighbors(sub_data, dims = dim.use)
+  sub_data <- FindClusters(sub_data, resolution = res)
+
+  
+  # 创建你的图形，注意需要将它们保存为变量
+  p1 <- TSNEPlot(sub_data, label = T)
+  p2 <- TSNEPlot(sub_data, split.by = "group", label = T)
+  p3 <- UMAPPlot(sub_data, label = T)
+  p4 <- UMAPPlot(sub_data, split.by = "group", label = T)
+  # 使用plot_grid将四个图形组合在一起
+  combined_plot <- plot_grid(p1, p2, p3, p4, ncol = 2)
+  # 将组合后的图形保存为PDF文件
+  ggsave(filename = paste0("./",sam.name,"/",file_head,"_Dimplot.pdf"), plot = combined_plot,width = 15,height = 8)
+  
+  
+  
+  #找差异基因
+  sub.cellmarker<- FindAllMarkers(sub_data, only.pos = TRUE, 
+                                min.pct = 0.3, logfc.threshold = 0.25)
+  write.table(sub.cellmarker,
+              file=paste0("./",sam.name,"/",file_head,"_total_marker_genes_tsne_",as.character(res),"_",max(dim.use),"PC.txt"),
+              sep="\t",quote = F,row.names = F)
+  
+  
+  # 计算每个实验组在每个 cluster 中的细胞数量
+  cell_counts <- table(sub_data@meta.data$group, sub_data@meta.data$seurat_clusters)
+  
+  # 将数据转换为 data frame 并为列命名
+  cell_counts_df <- as.data.frame.table(cell_counts)
+  names(cell_counts_df) <- c("group", "cluster", "cell_count")
+  
+  # 计算每个 cluster 在每个 group 中的百分比
+  cell_counts_df$percentage <- ave(cell_counts_df$cell_count, cell_counts_df$group, FUN = function(x) x / sum(x) * 100)
+  
+  # 对比两组中每个 cluster 的百分比
+  ggplot(cell_counts_df, aes(x = cluster, y = percentage, fill = group)) +
+    geom_bar(stat = "identity", position = "dodge") +
+    theme_minimal() +
+    xlab("Cluster") +
+    ylab("Percentage of cells (%)") +
+    ggtitle(paste0("Percentage of cells in each cluster for ",sam.name)) +
+    theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+  ggsave(paste0("./",sam.name,"/","resoluton=",res,"_",file_head,"_cluster_percentage.pdf"))
+  
+  saveRDS(sub_data,paste0("./",sam.name,"/data/",file_head,"_data.rds"))
+  saveRDS(cell_counts_df,paste0("./",sam.name,"/data/",file_head,"_count_df.rds"))
+  write.xlsx(cell_counts_df,paste0("./",sam.name,"/",file_head,"_count_df.xlsx"))
+  
+  return(sub_data)
+}
+
+mydata <- my_sc_flow(my_data,"B_cell","B_cell",dim.set = 15,res.set = 0.6)
+```
+
+
+#亚组分析
+```{r}
+
+subgroup_analysis<- function(data,sam.name,max.cluster){
+  for(clu_num in 0:max.cluster){
+    
+    cluster <- paste0("cluster",as.character(clu_num))
+    dir.create(paste0("./",sam.name,"/subset"))
+    dir.create(paste0("./",sam.name,"/subset/",cluster))
+    
+  #需要修改
+    df <- data@meta.data[c("group", "seurat_clusters")]
+    df$is_cluster <- df$seurat_clusters == clu_num
+    contingency_table <- table(df$group, df$is_cluster)
+    chisq_test <- chisq.test(contingency_table)
+    
+    observed <- chisq_test$observed
+    expected <- chisq_test$expected
+    residuals <- (observed - expected) / sqrt(expected)
+    
+    significant_residuals <- which(abs(residuals) > 2, arr.ind = TRUE)
+    
+      # 创建并写入卡方检验和残差分析的结果
+    result_filename <- paste0("./",sam.name,"/subset/",cluster,"/cluster_test_result.xlsx")
+    df_to_write <- data.frame(
+      "Chi-square test result" = toString(chisq_test),
+      "Standardized residuals" = toString(residuals),
+      "Significant residuals (row and column indices)" = toString(significant_residuals)
+    )
+    write.xlsx(df_to_write, result_filename)
+  
+    
+    # 以下是你原有的代码，我假设它们在这个循环中应该保持不变
+    # 取出你感兴趣的群体
+  #需要修改
+    cluster_data <- subset(data, subset = seurat_clusters == clu_num & group %in% c("Control","24h", "48h"))
+    cluster_data <- subset(data, subset = nFeature_RNA > 200)
+    cluster_data <- cluster_data[ , cluster_data$nCount_RNA > 0]
+    
+    # 将数据转换为DESeqDataSet
+    dds <- DESeqDataSetFromMatrix(countData = cluster_data@assays$RNA@counts + 1,
+                                colData = cluster_data@meta.data,
+                                design = ~ group)
+    dds$group <- relevel(dds$group, ref = "Control")
+    # 进行差异表达分析
+    dds <- DESeq(dds)
+  
+    # 获取差异表达的结果
+    res <- results(dds)
+    res_df <- as.data.frame(res)
+    write.xlsx(res_df,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG.xlsx"),rowNames = T)
+    saveRDS(res,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_deg_data.rds"))
+  
+  
+  
+  
+    #   选择显著差异表达的基因
+    sig_genes <- rownames(res)[res$pvalue < 0.05 & (abs(res$log2FoldChange) > 1)]
+    sig_genes <- sig_genes[!is.na(sig_genes)]
+    file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_total_",as.character(length(sig_genes)),".txt"))
+    
+    res.Control.vs.24h <- results(dds, contrast = c("group", "24h", "Control"))
+    res.Control.vs.48h <- results(dds, contrast = c("group", "48h", "Control"))
+    res.24h.vs.48h <- results(dds, contrast = c("group", "48h", "24h"))
+    
+    sig_genes.Control.vs.24h <- rownames(res.Control.vs.24h)[which(res.Control.vs.24h$pvalue < 0.05 & abs(res.Control.vs.24h$log2FoldChange) > 1)]
+    sig_genes.Control.vs.48h <- rownames(res.Control.vs.48h)[which(res.Control.vs.48h$pvalue < 0.05 & abs(res.Control.vs.48h$log2FoldChange) > 1)]
+    sig_genes.24h.vs.48h <- rownames(res.24h.vs.48h)[which(res.24h.vs.48h$pvalue < 0.05 & abs(res.24h.vs.48h$log2FoldChange) > 1)]
+    
+    sig_genes.Control.vs.24h.48h <- union(sig_genes.Control.vs.24h, sig_genes.Control.vs.48h)
+    file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_con_",as.character(length(sig_genes.Control.vs.24h.48h)),".txt"))
+    file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_24h_",as.character(length(sig_genes.24h.vs.48h)),".txt"))
+  
+    
+    mart <- readRDS("./mart.rds")
+    #开始算control vs 24 48
+    gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                   filters = 'mgi_symbol', 
+                   values = sig_genes.Control.vs.24h.48h, 
+                   mart = mart)
+    # BP, CC和MF三种通路都一起富集
+    ego_ALL_control <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                      #universe     = row.names(dge.celltype),
+                      OrgDb         = org.Mm.eg.db,
+                      keyType       = 'ENTREZID',
+                      ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                      pAdjustMethod = "BH",
+                      readable = T)
+    
+    ego_all_control <- data.frame(ego_ALL_control)
+    ego_all_control <- ego_all_control[order(ego_all_control$p.adjust),]
+    ego_all_control <- ego_all_control %>%
+      arrange(desc(Count))
+    ego_all_control_top30 <- ego_all_control[1 : 30,]
+    p_con <- ggplot(data=ego_all_control_top30, aes(x=Description,y=Count)) + 
+      geom_bar(stat="identity", width=0.8,fill='#006b7b') + 
+      coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+      theme_bw()
+    
+    #开始计算
+    gene_result_24_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                   filters = 'mgi_symbol', 
+                   values = sig_genes.24h.vs.48h, 
+                   mart = mart)
+    # BP, CC和MF三种通路都一起富集
+    ego_ALL_24h <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                      #universe     = row.names(dge.celltype),
+                      OrgDb         = org.Mm.eg.db,
+                      keyType       = 'ENTREZID',
+                      ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                      pAdjustMethod = "BH",
+                      readable = T)
+    
+    
+    
+    ego_all_24h <- data.frame(ego_ALL_24h)
+    write.csv(ego_all_24h,paste0("./",sam.name,"/subset/",cluster,"/enrichGO_all_24h.csv"))
+    
+    ego_all_24h <- ego_all_24h[order(ego_all_24h$p.adjust),]
+    ego_all_24h <- ego_all_24h %>%
+      arrange(desc(Count))  
+    ego_all_24h_top30 <- ego_all_24h[1 : 30,]
+  
+    p_24h <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+      geom_bar(stat="identity", width=0.8,fill='#ffbc14') + 
+      coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+      theme_bw()
+    p_combined <- plot_grid(p_con,p_24h)
+    ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_allont.pdf"),
+           plot = p_combined,
+           width = 30,height = 16)
+  
+  
+    # BP富集
+    ego_ALL_control_BP <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                      #universe     = row.names(dge.celltype),
+                      OrgDb         = org.Mm.eg.db,
+                      keyType       = 'ENTREZID',
+                      ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                      pAdjustMethod = "BH",
+                      readable = T)
+    
+    ego_all_control_bp <- data.frame(ego_ALL_control_BP)
+    ego_all_control_bp <- ego_all_control_bp[order(ego_all_control_bp$p.adjust),]
+    ego_all_control_bp <- ego_all_control_bp %>%
+      arrange(desc(Count))
+    ego_all_control_bp_top30 <- ego_all_control_bp[1 : 30,]
+    p_con_bp <- ggplot(data=ego_all_control_bp_top30, aes(x=Description,y=Count)) + 
+      geom_bar(stat="identity", width=0.6,fill='#006b7b') + 
+      coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+      theme_bw()
+    
+    
+    ego_ALL_24h_BP <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                      #universe     = row.names(dge.celltype),
+                      OrgDb         = org.Mm.eg.db,
+                      keyType       = 'ENTREZID',
+                      ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                      pAdjustMethod = "BH",
+                      readable = T)
+    
+    
+    
+    ego_all_24h_bp <- data.frame(ego_ALL_24h_BP)
+    ego_all_24h_bp <- ego_all_24h_bp[order(ego_all_24h$p.adjust),]
+    ego_all_24h_bp <- ego_all_24h_bp %>%
+      arrange(desc(Count))  
+    ego_all_24h_top30 <- ego_all_24h_bp[1 : 30,]
+  
+    p_24h_bp <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+      geom_bar(stat="identity", width=0.6,fill='#ffbc14') + 
+      coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+      theme_bw()
+    p_combined <- plot_grid(p_con_bp,p_24h_bp)
+    ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_bp_ont.pdf"),
+           plot = p_combined,
+           width = 30,height = 16)
+  
+    #kegg
+    clu_kegg_con <- enrichKEGG(gene = na.omit(gene_result_con_vs$entrezgene_id), 
+                           organism = 'mmu')
+    clu_kegg_24h <- enrichKEGG(gene = na.omit(gene_result_24_vs$entrezgene_id), 
+                           organism = 'mmu')
+    
+    try(p_con1 <- barplot(clu_kegg_con, showCategory=12),silent = T)
+    try(p_con2 <- dotplot(clu_kegg_con, showCategory=12),silent = T)
+    plotc_1 = p_con1/p_con2
+    
+    try(p_con3 <- barplot(clu_kegg_24h, showCategory=12),silent = T)
+    try(p_con4 <- dotplot(clu_kegg_24h, showCategory=12),silent = T)
+    plotc_2 = p_con3/p_con4 
+    
+    try(p_combined_kegg <- plot_grid(plotc_1,plotc_2),silent = T)
+    
+    try(ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"enrich_KEGG.pdf"), plot = p_combined_kegg, width = 36, height = 30),silent = T)
+  
+    
+    
+    #############################
+    
+    # 第一张图: 三个组别用sig_genes.Control.vs.24h.48h基因来做热图
+  
+    exprs_data_1 <- cluster_data[["RNA"]]@data[sig_genes.Control.vs.24h.48h, ]
+  
+    # 标准化数据
+    exprs_data_1 <- t(scale(t(exprs_data_1)))
+  
+    # 添加分组信息
+    ha_1 = HeatmapAnnotation(df = data.frame(group = cluster_data@meta.data$group),
+                         col = list(group = c("Control" = "#00b0eb", "24h" = "#ffd401", "48h" = "#e20612")),
+                         show_annotation_name = TRUE)
+  
+    # 将分组信息作为一个因子，用于列聚类
+    cluster_cols_1 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data@meta.data$group)))))
+  
+    # 绘制热图
+    col_fun = circlize::colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+    heatmap_1 = Heatmap(exprs_data_1, 
+                    name = "expression", 
+                    top_annotation = ha_1, 
+                    show_row_names = TRUE, 
+                    show_column_names = FALSE, 
+                    clustering_method_rows = "complete", 
+                    clustering_distance_rows = "euclidean",
+                    clustering_method_columns = "complete",
+                    clustering_distance_columns = "euclidean",
+                    cluster_columns = cluster_cols_1)
+  
+  
+  
+  # 第二张图: 24h组和48h组用sig_genes.24h.vs.48h基因来做热图
+  
+    cluster_data_2 <- subset(cluster_data, subset = group %in% c("24h", "48h"))
+  
+    exprs_data_2 <- cluster_data_2[["RNA"]]@data[sig_genes.24h.vs.48h, ]
+  
+    # 标准化数据
+    exprs_data_2 <- t(scale(t(exprs_data_2)))
+  
+    # 添加分组信息
+    ha_2 = HeatmapAnnotation(df = data.frame(group = cluster_data_2@meta.data$group),
+                         col = list(group = c("24h" = "#3f60aa", "48h" = "#e20612")),
+                         show_annotation_name = TRUE)
+  
+    # 将分组信息作为一个因子，用于列聚类
+    cluster_cols_2 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data_2@meta.data$group)))))
+  
+    # 绘制热图
+    heatmap_2 = Heatmap(exprs_data_2, 
+                    name = "expression", 
+                    top_annotation = ha_2, 
+                    show_row_names = TRUE, 
+                    show_column_names = FALSE, 
+                    clustering_method_rows = "complete", 
+                    clustering_distance_rows = "euclidean",
+                    clustering_method_columns = "complete",
+                    clustering_distance_columns = "euclidean",
+                    cluster_columns = cluster_cols_2)
+
+    pdf(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_heatmap.pdf"), width = 20, height = 15)
+    layout(matrix(1:2,2,1))
+    draw(heatmap_1, heatmap_legend_side = "bot")
+    draw(heatmap_2, heatmap_legend_side = "bot")
+    dev.off()
+  }
+}
+
+subgroup_analysis(sub_data,sam.name,6)
+```
+
+
+#转基因名
+```{r}
+mart <- readRDS("./mart.rds")
+#开始算control vs 24 48
+gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                   filters = 'mgi_symbol', 
+                   values = sig_genes.Control.vs.24h.48h, 
+                   mart = mart)
+```
+
+#画变化比例图
+```{r}
+#cell_name
+library(tidyverse)
+metadata <- enterocyte_all@meta.data
+
+
+# metadata <- metadata %>%
+#   mutate(cell_name = cell_type)
+
+
+grouped_metadata <- metadata %>%
+  group_by(group, cell_name) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(group) %>%
+  mutate(freq = n / sum(n))
+
+# 针对每个细胞类型计算24h和Control，48h和24h的变化比例
+change_ratio <- grouped_metadata %>%
+  group_by(cell_name) %>%
+  summarise(`24h_vs_Control` = (freq[group == "24h"] - freq[group == "Control"]) / freq[group == "Control"],
+            `48h_vs_24h` = (freq[group == "48h"] - freq[group == "24h"]) / freq[group == "24h"], .groups = "drop") %>%
+  mutate(Control = c(0)) %>%
+  dplyr::select("cell_name","Control","24h_vs_Control","48h_vs_24h")
+
+
+# 将Control列的值设置为1
+change_ratio$Control <- 1
+
+# 计算24h组的相对值
+change_ratio$`24h` <- change_ratio$Control * (1 + change_ratio$`24h_vs_Control`)
+
+# 计算48h组的相对值
+change_ratio$`48h` <- change_ratio$`24h` * (1 + change_ratio$`48h_vs_24h`)
+
+order_cells <- change_ratio %>%
+  arrange(-`48h`) %>%
+  pull(cell_name)
+
+change_ratio$cell_name <- factor(change_ratio$cell_name, levels = order_cells)
+
+change_ratio_long <- change_ratio %>%
+  dplyr::select(cell_name, Control, `24h`, `48h`) %>%
+  gather(key = "timepoint", value = "relative_value", -cell_name)
+
+# 设置timepoint的因子级别
+change_ratio_long$timepoint <- factor(change_ratio_long$timepoint, levels = c("Control", "24h", "48h"))
+
+p<- ggplot(change_ratio_long, aes(x = timepoint, y = relative_value, group = cell_name, color = cell_name)) +
+      geom_line(size = 1) +
+      geom_point(size = 3) +
+      theme_minimal() +
+      scale_color_manual(values = cols_1)+
+      labs(y = "Relative Cell Frequency")
+print(p)
+
+# tiff("./Mesenchymal_cell/figure/mesen_change_line_chart.tiff",res = 300,units = "in",width = 7,height = 5)
+# p
+# dev.off()
+```
+
+
+```{r}
+#柱状图
+library(tidyverse)
+
+
+grouped_metadata <- metadata %>%
+  group_by(group, cell_name) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(group) %>%
+  mutate(freq = n / sum(n))
+
+# 针对每个细胞类型计算24h和Control，48h和24h的变化比例
+change_ratio <- grouped_metadata %>%
+  group_by(cell_name) %>%
+  summarise(`24h_vs_Control` = (freq[group == "24h"] - freq[group == "Control"]) / freq[group == "Control"],
+            `48h_vs_24h` = (freq[group == "48h"] - freq[group == "24h"]) / freq[group == "24h"], .groups = "drop") %>%
+  mutate(Control = c(0)) %>%
+  dplyr::select("cell_name","Control","24h_vs_Control","48h_vs_24h")
+
+
+# 将Control列的值设置为1
+change_ratio$Control <- 1
+
+# 计算24h组的相对值
+change_ratio$`24h` <- change_ratio$Control * (1 + change_ratio$`24h_vs_Control`)
+
+# 计算48h组的相对值
+change_ratio$`48h` <- change_ratio$`24h` * (1 + change_ratio$`48h_vs_24h`)
+
+order_cells <- change_ratio %>%
+  arrange(-`48h`) %>%
+  pull(cell_name)
+
+change_ratio$cell_name <- factor(change_ratio$cell_name, levels = order_cells)
+
+change_ratio_long <- change_ratio %>%
+  dplyr::select(cell_name, Control, `24h`, `48h`) %>%
+  gather(key = "timepoint", value = "relative_value", -cell_name)
+
+# 设置timepoint的因子级别
+change_ratio_long$timepoint <- factor(change_ratio_long$timepoint, levels = c("Control", "24h", "48h"))
+
+
+# 使用ggplot绘制柱状图和折线图
+p <- ggplot(change_ratio_long, aes(x = cell_name, y = relative_value, group = timepoint)) +
+      # 柱状图
+      geom_col(aes(fill = timepoint), position = position_dodge(width = 0.8), width = 0.7) +
+      theme_minimal() +
+      scale_fill_manual(values = cols_1) +  # 假设cols_1是你定义的颜色向量
+      labs(y = "Scaled Cell Count", x = "Cell Type of Blood samples")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p)
+```
+
+```{r}
+
+tiff("../blood_multi/figure/cell_type_change_bar.tiff",units = "in",res = 300,width = 8,height = 5)
+p
+dev.off()
+
+```
+
+
+
+
+```{r}
+file_path <- "./all_enterocyte/figure/"
+cell_head <- "enterocyte"
+paste0(file_path,cell_head,"_","subgroup_proportion.pdf")
+
+write.xlsx(change_ratio,file = paste0(file_path,cell_head,"_","proportion_change_ratio.xlsx"))
+ggsave(paste0(file_path,cell_head,"_","subgroup_proportion.pdf"),plot = p,width = 5,height = 8)
+```
+
+```{r}
+
+```
+
+
+#画每组的百分比图
+```{r}
+library(dplyr)
+# 1. 提取meta.data
+metadata <- enterocyte_all@meta.data
+
+# 2. 计算每组中cell_name的数量
+
+count_data <- metadata %>%
+  group_by(group, cell_name) %>%
+  summarise(count = n())
+
+# 3. 计算每个组中cell_name的百分比
+total_by_group <- metadata %>% group_by(group) %>% summarise(total = n())
+percent_data <- left_join(count_data, total_by_group, by="group")
+percent_data$percentage <- (percent_data$count / percent_data$total) * 100
+
+# 4. 使用ggplot2绘制柱状图
+library(ggplot2)
+
+cell_names <- unique(metadata$cell_name)
+
+
+
+# 绘制数量的柱状图
+ggplot(count_data, aes(x=group, y=count, fill=cell_name)) +
+  geom_bar(stat="identity", position="stack") +
+  labs(title="Number of cells per cell_name by group") +
+  ylab("Number of cells") +
+  xlab("Group")
+  
+
+# 绘制百分比的柱状图
+ggplot(percent_data, aes(x=group, y=percentage, fill=cell_name)) +
+  geom_bar(stat="identity", position="stack") +
+  labs(title="Percentage of cells per cell_name by group") +
+  ylab("Percentage") +
+  xlab("Group")
+
+
+p <- ggplot(percent_data, aes(x=group, y=percentage, fill=cell_name)) +
+      geom_bar(stat="identity", position="stack") +
+      scale_fill_manual(values = setNames(cols_1, cell_names)) +
+      labs(title=element_blank()) +
+      ylab("Percentage") +
+      xlab("")
+print(p)
+
+# tiff("../figure/Fig. 4/Fig. 4g.tiff",res = 300,units = "in",height = 6,width = 4)
+# p
+# dev.off()
+
+```
+饼图
+```{r}
+library(ggplot2)
+library(dplyr)
+library(gridExtra)
+
+
+metadata <- Macrophage_sub@meta.data
+
+# 2. 计算每组中cell_name的数量
+
+count_data <- metadata %>%
+  group_by(group, cell_name) %>%
+  summarise(count = n())
+
+# 3. 计算每个组中cell_name的百分比
+total_by_group <- metadata %>% group_by(group) %>% summarise(total = n())
+percent_data <- left_join(count_data, total_by_group, by="group")
+percent_data$percentage <- (percent_data$count / percent_data$total) * 100
+percent_data$percentage <- as.numeric(percent_data$percentage)
+
+# 使用整体数据计算prop
+percent_data <- percent_data %>%
+  arrange(group, cell_name) %>%
+  mutate(prop = count / sum(count, na.rm = TRUE))
+
+p_pie <- ggplot(percent_data, aes(x = 2, y = prop, fill = cell_name)) +
+  geom_bar(stat = "identity", color = "white") +
+  coord_polar(theta = "y", start = 0) +
+  scale_fill_manual(values = cols_1) +
+  theme_void() +
+  xlim(0.5, 2.5) +
+  facet_wrap(~group)
+
+p_pie
+
+proportion_table <- percent_data %>%
+  select(group, cell_name, prop) %>%
+  mutate(prop = scales::percent(prop, accuracy = 1))
+
+print(proportion_table)
+```
+```{r}
+tiff("./Macrophage/figure/pie.tiff",width = 20, height = 15, units = "in", res = 300)
+p_pie
+dev.off()
+
+write.xlsx(proportion_table,"./Macrophage/figure/p_pie_xlab.xlsx")
+```
+
+
+#差异基因+富集分析
+```{r}
+library(clusterProfiler)
+library(ggplot2)
+library(org.Mm.eg.db)
+library(biomaRt)
+library(dplyr)
+
+expr_and_go_kegg <- function(frame,up_threshold = log2(1.2),down_threshold = log2(0.8)){
+  print("确保数据的列是avg_log2FC和p_val_adj")
+  data <- as.data.frame(frame)
+  data <- data %>%
+    mutate(expr = case_when(
+      avg_log2FC >= up_threshold & p_val_adj <= 0.05 ~ "UP",
+      avg_log2FC <= down_threshold & p_val_adj <= 0.05 ~ "DOWN",
+      T ~ "NS"),
+      gene <- rownames(data)
+  )
+  print(table(data$expr))
+  
+  if (!exists("mart")) {
+    mart <- readRDS("./mart.rds")
+  }
+  
+  gene_trans <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = data$gene, 
+                 mart = mart)
+  data$entrez_id <- gene_trans$entrezgene_id[match(data$gene, gene_trans$mgi_symbol)]
+  
+  
+  up.gene <- na.omit(data[data$expr == "UP",]$entrez_id)
+  down.gene <- na.omit(data[data$expr == "DOWN",]$entrez_id)
+  
+  up.go <- enrichGO(gene = up.gene,
+                    keyType = "ENTREZID",
+                    OrgDb = org.Mm.eg.db,
+                    ont = "BP"
+  )
+  
+  
+  down.go <- enrichGO(gene = down.gene,
+                    keyType = "ENTREZID",
+                    OrgDb = org.Mm.eg.db,
+                    ont = "BP"
+  )
+  
+  top10_up <- if (nrow(as.data.frame(up.go)) >= 10) {
+    as.data.frame(up.go) %>% dplyr::slice(1:10)
+  } else {
+    as.data.frame(up.go)
+  }
+  
+  top10_down <- if (nrow(as.data.frame(down.go)) >= 10) {
+    as.data.frame(down.go) %>% dplyr::slice(1:10)
+  } else {
+    as.data.frame(down.go)
+  }
+  # 添加分组列
+  top10_up$Group <- "up_gene"
+  top10_down$Group <- "down_gene"
+  
+  # 合并
+  df.all.top10 <- rbind(top10_up, top10_down)
+  
+  # 使用ggplot2来创建气泡图
+  p <- ggplot(df.all.top10, aes(x = Group, y = Description, size = GeneRatio, color = p.adjust)) +
+    geom_point(alpha = 0.6) +
+    theme_minimal() +
+    labs(title = "Top 10 GO Enrichment Analysis", x = "Time Group", y = "GO Term", size = "Gene Ratio", color = "Adjusted p-value") +
+    theme(legend.position = "right")
+  print(p)
+  
+    # KEGG analysis
+  up.kegg <- enrichKEGG(gene = up.gene, organism = 'mmu', keyType = 'kegg')
+  down.kegg <- enrichKEGG(gene = down.gene, organism = 'mmu', keyType = 'kegg')
+  up.kegg.data <- as.data.frame(up.kegg) %>%
+    dplyr::slice(1:10) %>%
+    mutate(Group = "up_gene")
+  down.kegg.data <- as.data.frame(down.kegg) %>%
+    dplyr::slice(1:10) %>%
+    mutate(Group = "down_gene")
+  df.all.kegg.top10 <- rbind(up.kegg.data, down.kegg.data)
+  # Combine KEGG results for bar plot
+  p_kegg <- ggplot(df.all.kegg.top10, aes(x = Group, y = Description, size = GeneRatio, color = p.adjust)) +
+    geom_point(alpha = 0.6) +
+    theme_minimal() +
+    labs(title = "Top 10 GO Enrichment Analysis", x = "Time Group", y = "GO Term", size = "Gene Ratio", color = "Adjusted p-value") +
+    theme(legend.position = "right")
+  
+  return(list(data.frame = data,
+              up.go.data = up.go,
+              down.go.data = down.go,
+              up.go.result = top10_up,
+              down.go.result = top10_down,
+              figure.go = p,
+              figure.kegg = p_kegg,
+              up.kegg.data = up.kegg,
+              down.kegg.data = down.kegg))  
+}
+
+
+```
+
+##多组气泡图
+```{r}
+library(dplyr)
+library(ggplot2)
+library(stringr)
+
+plot_enrichment_results <- function(df_list, group_names, n = 5) {
+  if(length(df_list) != length(group_names)) {
+    stop("The length of df_list must be equal to the length of group_names.")
+  }
+  
+  # 处理每个数据框并赋予组名
+  plot_data_list <- lapply(1:length(df_list), function(i) {
+    df <- df_list[[i]] %>%
+      as.data.frame() %>%
+      dplyr::slice(1:n) %>%
+      mutate(group = group_names[i])
+    return(df)
+  })
+  
+  # 合并数据
+  plot_data <- do.call(rbind, plot_data_list)
+  
+  # 转换数据类型
+  plot_data$GeneRatio <- as.numeric(sub("/.*", "", plot_data$GeneRatio))
+  plot_data$Count <- as.numeric(plot_data$Count)
+  
+  # 将Description的文本在每40个字符处分行
+  plot_data <- plot_data %>%
+    mutate(WrappedDesc = str_wrap(Description, width = 60))  
+  
+  # 创建点图
+  p <- ggplot(plot_data, aes(x = group, y = reorder(WrappedDesc, GeneRatio), size = GeneRatio, color = -log10(pvalue))) +
+    geom_point(alpha = 0.6) +
+    scale_color_gradient(low = "#2f4e87", high = "#af2934") +
+    theme_minimal() +
+    labs(title = "", x = "", y = "GO term", size = "Gene Ratio", color = "-log10(pvalue)") +
+    theme(legend.position = "right")
+  
+  # 返回处理后的数据和绘图
+  return(list(data = plot_data, plot = p))
+}
+
+# # 使用函数
+# list1 <- as.data.frame(enrichGO(
+#     gene = cm$wide.res[cm$wide.res$cluster == 1,]$gene,
+#     OrgDb = org.Mm.eg.db,
+#     keyType = "SYMBOL",
+#     ont = "BP"
+#   ))
+# list2 <- as.data.frame(enrichGO(
+#     gene = cm$wide.res[cm$wide.res$cluster == 9,]$gene,
+#     OrgDb = org.Mm.eg.db,
+#     keyType = "SYMBOL",
+#     ont = "BP"
+#   ))
+# list3 <- as.data.frame(enrichGO(
+#     gene = cm$wide.res[cm$wide.res$cluster == 8,]$gene,
+#     OrgDb = org.Mm.eg.db,
+#     keyType = "SYMBOL",
+#     ont = "BP"
+#   ))
+# 
+# df_list <- list(list1,list2,list3)
+# group_names <- c("Cluster1","Cluster9","Cluster8")
+# result <- plot_enrichment_results(df_list, group_names, n = 5)
+# # 
+# # # 显示绘图
+# tiff("./all_enterocyte/figure/Tmigd1+_mfuzz_cluster_1_8_9_dotplot.tiff",res = 300,units = "in",width = 7,height = 7)
+# print(result$plot)
+# dev.off()
+```
+
+##多组bar图
+```{r}
+barplot_enrichment_results <- function(df_list, group_names, n = 5, custom_colors = NULL) {
+  if(length(df_list) != length(group_names)) {
+    stop("The length of df_list must be equal to the length of group_names.")
+  }
+  
+  # 确定颜色方案
+  if (is.null(custom_colors) || length(custom_colors) < length(group_names)) {
+    colors <- RColorBrewer::brewer.pal(min(length(group_names), 8), "Set1")
+    if (length(group_names) > 8) {
+      colors <- grDevices::rainbow(length(group_names))
+    }
+  } else {
+    colors <- custom_colors[1:length(group_names)]
+  }
+  
+  # 处理每个数据框并赋予组名
+  plot_data_list <- lapply(1:length(df_list), function(i) {
+    df <- as.data.frame(df_list[[i]]) %>%
+      dplyr::slice(1:n) %>%
+      dplyr::mutate(group = group_names[i],
+                    log_pvalue = -log10(pvalue))
+    return(df)
+  })
+  
+  # 合并数据
+  plot_data <- do.call(rbind, plot_data_list)
+  
+  # 创建条形图
+  p <- ggplot(plot_data, aes(x = reorder(Description, log_pvalue), y = log_pvalue, fill = group)) +
+    geom_col() +
+    coord_flip() +
+    scale_fill_manual(values = colors) +
+    theme_minimal() +
+    labs(title = "", x = "GO term", y = "-log10(padj)", fill = "Group") +
+    theme(legend.position = "right")
+  
+  return(list(data = plot_data, plot = p))
+}
+```
+
+
+
+
+#富集分析
+```{r}
+#转基因名
+mart <- readRDS("./mart.rds")
+gene_trans <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = gene_list, 
+                 mart = mart)
+# BP, CC和MF三种通路都一起富集
+go_result <- enrichGO(gene = na.omit(gene_trans$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+
+kegg_result <- enrichKEGG(gene = na.omit(gene_trans$entrezgene_id), 
+                         organism = 'mmu')
+
+
+```
+
+##多组气泡图
+```{r}
+
+nkt <- subset(T_cell_sub,subset = cell_name == "NKT")
+nkt <- SetIdent(nkt,value = "group")
+nkt.makrer <- FindMarkers(nkt,ident.1 = "48h",ident.2 = "24h")
+
+multi_enrich <- function(res_marker,threshold){
+  nkt.gene.48h <- rownames(res_marker[res_marker$avg_log2FC>=threshold & res_marker$p_val_adj <=0.05,])
+  nkt.gene.24h <- rownames(res_marker[res_marker$avg_log2FC<=-threshold & res_marker$p_val_adj <=0.05,])
+  
+  nkt.go.48h <- enrichGO(nkt.gene.48h,
+                     OrgDb = org.Mm.eg.db,
+                     keyType = "SYMBOL",
+                     ont = "BP")
+  
+  nkt.go.24h <- enrichGO(nkt.gene.24h,
+                     OrgDb = org.Mm.eg.db,
+                     keyType = "SYMBOL",
+                     ont = "BP")
+  top10_48h <- as.data.frame(nkt.go.48h) %>%
+    slice(1:10)
+  top10_24h <- as.data.frame(nkt.go.24h)%>%
+    slice(1:10)
+  # 添加分组列
+  top10_48h$Group <- "up_gene"
+  top10_24h$Group <- "down_gene"
+  
+  # 合并
+  df.all.top10 <- rbind(top10_48h, top10_24h)
+  
+  # 使用ggplot2来创建气泡图
+  p <- ggplot(df.all.top10, aes(x = Group, y = Description, size = GeneRatio, color = p.adjust)) +
+    geom_point(alpha = 0.6) +
+    theme_minimal() +
+    labs(title = "Top 10 GO Enrichment Analysis", x = "Time Group", y = "GO Term", size = "Gene Ratio", color = "Adjusted p-value") +
+    theme(legend.position = "right")
+  print(p)
+  return(list(figure = p,
+              up.data <- nkt.go.48h,
+              down.data <- nkt.go.24h,
+              up.result = top10_48h,
+              down.result = top10_24h))
+}
+```
+
+
+
+##GSEA
+```{r}
+cd4.marker <- FindMarkers(cd4,ident.1 = "48h",ident.2 = "24h")
+
+## 上一步差异分析得到差异基因列表deg后取出，p值和log2FC
+nrDEG = cd4.marker[,c('avg_log2FC', 'p_val')]
+colnames(nrDEG)=c('log2FoldChange','pvalue') ##更改列名
+
+#gsea的数据是一个差异分析的结果
+#有两列log2FoldChange和pvalue
+gsea_data <- nrDEG
+
+library(org.Hs.eg.db)
+library(clusterProfiler)
+## 把SYMBOL转换为ENTREZID，可能有部分丢失
+gene <- bitr(rownames(gsea_data),     
+             fromType = "SYMBOL",     
+             toType =  "ENTREZID",    
+             OrgDb = org.Mm.eg.db)
+## 基因名、ENTREZID、logFC一一对应起来
+gene$logFC <- gsea_data$log2FoldChange[match(gene$SYMBOL,rownames(gsea_data))]
+## 构建genelist
+geneList=gene$logFC
+names(geneList)=gene$ENTREZID 
+geneList=sort(geneList,decreasing = T) # 降序，按照logFC的值来排序
+## GSEA分析
+kk_gse <- gseKEGG(geneList     = geneList,
+                  organism     = 'mmu',
+                  minGSSize    = 10,
+                  pvalueCutoff = 0.9,
+                  verbose      = FALSE)
+kk_gse=DOSE::setReadable(kk_gse, OrgDb='org.Mm.eg.db',keyType='ENTREZID')
+sortkk<-kk_gse[order(kk_gse$enrichmentScore, decreasing = T),]
+
+library(enrichplot)
+par(2,1)
+gseaplot2(kk_gse, 
+          "mmu00190", 
+          color = "firebrick",
+          rel_heights=c(1, .2, .6))
+```
+
+
+#热图
+```{r}
+#基因热图
+Mesenchymal_sub <- SetIdent(Mesenchymal_sub, value = "cell_name")
+all_markers <- FindAllMarkers(Mesenchymal_sub, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25, group.by='cell_name')
+
+top5_genes_per_cell_name <- all_markers %>% group_by(cluster) %>% top_n(5, avg_log2FC)
+genes_to_plot <- top5_genes_per_cell_name$gene
+
+cell_names <- unique((Mesenchymal_sub@meta.data$cell_name))
+desired_order <- c("C", "A", "B")
+Mesenchymal_sub$cell_name <- factor(Mesenchymal_sub$cell_name, levels = desired_order)
+
+DoHeatmap(Mesenchymal_sub, features = genes_to_plot)
+
+
+pdf("./Mesenchymal_cell/figure/Mesenchymal_Clustered_heatmap.pdf",width = 20,height = 15)
+DoHeatmap(Mesenchymal_sub, features = genes_to_plot)
+dev.off()
+```
+
+```{r}
+library(ClusterGVis)
+library(Seurat)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+
+ClusterGVis_data <- Mesenchymal_sub
+
+ClusterGVis_data <- SetIdent(ClusterGVis_data,value = "cell_name")
+
+enterocyte_all.marker <- FindAllMarkers(ClusterGVis_data,
+                                        only.pos = T,
+                                        min.pct = 0.25,
+                                        logfc.threshold = 0.25)
+
+pbmc.markers <- enterocyte_all.marker %>%
+  dplyr::group_by(cluster) %>%
+  dplyr::top_n(n = 20, wt = avg_log2FC)
+
+st.data <- prepareDataFromscRNA(object = ClusterGVis_data,
+                                diffData = pbmc.markers,
+                                showAverage = TRUE)
+
+enrich <- enrichCluster(object = st.data,
+                        OrgDb = org.Mm.eg.db,
+                        type = "BP",
+                        organism = "mmu",
+                        pvalueCutoff = 0.5,
+                        topn = 5,
+                        seed = 5201314)
+
+# add gene name
+markGenes = unique(pbmc.markers$gene)[sample(1:length(unique(pbmc.markers$gene)),40,
+                                             replace = F)]
+
+# line plot
+visCluster(object = st.data,
+           plot.type = "line")
+
+
+visCluster(object = st.data,
+           plot.type = "heatmap",
+           column_names_rot = 50,
+           markGenes = markGenes,
+           cluster.order = c(1:10))
+```
+
+```{r}
+#调整热图中的列的聚类的顺序
+st.data$wide.res <- st.data$wide.res %>%
+  dplyr::select(c(3,4,7,1,6,2,8),everything())
+```
+
+```{r}
+#go.col中 n 要和组数相同
+path <- "./Mesenchymal_cell/figure/"
+
+tiff(paste0(path,"heatmap_clusterGVis.tiff"),width = 20, height = 15, units = "in", res = 300)
+visCluster(object = st.data,
+           plot.type = "both",
+           column_names_rot = 45,
+           show_row_dend = F,
+           markGenes = markGenes,
+           markGenes.side = "left",
+           annoTerm.data = enrich,
+           line.side = "left",
+           cluster.order = c(5,3,6,4,1,2,7), #左边的C后面的数字来调整行的上下
+           go.col = rep(jjAnno::useMyCol("stallion",n = 7),each = 5),
+           add.bar = T)
+dev.off()
+
+
+```
+
+
+#相关通路箱线图和表格
+##通路评分
+```{r}
+x.genes <- c()
+data <- AddModuleScore(object = T_cell_sub, features = list(x.genes), name = "Migration")
+data@meta.data <- data@meta.data %>%
+  mutate(Migration = Migration1)
+VlnPlot(object = T_cell_sub, features = "Migration", group.by = "cell_name",split.by = "group",pt.size = 0)
+```
+
+##小提琴图
+```{r}
+
+library(ggpubr)
+View(T_cell@meta.data)
+
+ggviolin(T_cell@meta.data, 
+         x="cell_name", y="AICD", 
+         width = 0.8,color = "black",#轮廓颜色
+         fill="cell_name",#填充 
+         xlab = F, #不显示x轴的标签 
+         add = 'mean_sd', 
+         bxp.errorbar=T,#显示误差条         
+         bxp.errorbar.width=0.05, #误差条大小          
+         size=0.5, #箱型图边线的粗细
+         palette = "npg", 
+         legend = "right")
+
+
+ggsave(filename="violin.pdf",width = 8,height = 5)
+```
+
+```{r}
+# 加载数据
+data <- T_cell@meta.data
+
+# 转换数据格式，以便绘图
+data_long <- data %>%
+  gather(key = "variable", value = "value", -cell_name, -group)
+
+# 绘制小提琴图
+p <- ggplot(data_long, aes(x = interaction(cell_name, group), y = value, fill = group)) +
+  geom_violin(trim = FALSE) +
+  geom_boxplot(width = 0.1) +
+  facet_wrap(~variable, scales = "free_y") +
+  theme_minimal() +
+  labs(x = "", y = "Value") +
+  theme(legend.position = "none")
+
+print(p)
+```
+
+
+##箱线图
+```{r}
+#初始相关通路评分箱线图
+View(T_cell_sub)
+
+data_long <- T_cell_sub@meta.data %>%
+  select(cell_name, group, AICD, Intrinsic_apoptosis, Extrinsic_apoptosis, negative_Autophagy, positive_Autophagy, Pyroptosis,Antigen_Presentation,Migration,Proliferation) %>%
+  pivot_longer(cols = c(AICD, Intrinsic_apoptosis, Extrinsic_apoptosis, negative_Autophagy, positive_Autophagy, Pyroptosis,Antigen_Presentation,Migration,Proliferation),
+               names_to = "Score_Type", values_to = "Score_Value")
+
+ggplot(data_long, aes(x = group, y = Score_Value, fill = group)) + 
+  geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+  facet_grid(Score_Type ~ cell_name, scales = "free", space = "free") + 
+  theme_minimal() +
+  labs(title = "Intestine Relative pathways about population shrink",
+       x = "Group",
+       y = "Score Value")
+ggsave("./T_cell/figure/Intestine_Box_plot of relative pathways.pdf",width = 15,height = 9)
+
+
+
+```
+
+```{r}
+View(T_cell_sub)
+
+data_long <- T_cell_sub@meta.data %>%
+  select(cell_name, group, AICD, Intrinsic_apoptosis, Pyroptosis,Antigen_Presentation,Migration,Proliferation) %>%
+  pivot_longer(cols = c(AICD, Intrinsic_apoptosis, Pyroptosis,Antigen_Presentation,Migration,Proliferation,),
+               names_to = "Score_Type", values_to = "Score_Value")
+
+ggplot(data_long, aes(x = group, y = Score_Value, fill = group)) + 
+  geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+  facet_grid(Score_Type ~ cell_name, scales = "free", space = "free") + 
+  theme_minimal() +
+  labs(title = "Intestine Relative pathways about population shrink",
+       x = "Group",
+       y = "Score Value")
+ggsave("./T_cell/figure/selected_Intestine_Box_plot of relative pathways.pdf",width = 15,height = 9)
+
+
+```
+
+
+
+##p值表
+```{r}
+pathways = c("Proliferation" ,"Antigen_Presentation", "AICD" ,"Intrinsic_apoptosis" ,"Extrinsic_apoptosis","negative_Autophagy","positive_Autophagy","Pyroptosis","Migration")
+
+
+calculate_p_values_for_pathway <- function(data, pathway) {
+  p_val_24h <- round(wilcox.test(data[data$group == "Control", pathway], data[data$group == "24h", pathway])$p.value, 3)
+  p_val_48h <- round(wilcox.test(data[data$group == "Control", pathway], data[data$group == "48h", pathway])$p.value, 3)
+  p_val_24h_48h <- round(wilcox.test(data[data$group == "24h", pathway], data[data$group == "48h", pathway])$p.value, 3)
+  
+  data.frame(
+    cell_name = unique(data$cell_name),
+    pathway = pathway,
+    p_Control_24h = p_val_24h, 
+    p_Control_48h = p_val_48h, 
+    p_24h_48h = p_val_24h_48h
+  )
+}
+
+all_pvalues <- lapply(unique(T_cell_sub@meta.data$cell_name), function(cell_type) {
+  cell_data <- T_cell_sub@meta.data[T_cell_sub@meta.data$cell_name == cell_type,]
+  do.call(rbind, lapply(pathways, calculate_p_values_for_pathway, data = cell_data))
+})
+
+pvalue_data <- do.call(rbind, all_pvalues)
+
+write.xlsx(pvalue_data,"./T_cell/figure/all_relative_pathway_p_val.xlsx")
+
+colnames(T_cell_sub@meta.data)
+```
+
+
+#回落基因
+```{r}
+
+
+revert_gene <- function(data,cell,expr_level){
+  data <- subset(data,subset = cell_name == cell)
+  data <- SetIdent(data,value = "group")
+  res_24_vs_con <- FindMarkers(data,ident.1 =  "24h",ident.2 = "Control")
+  up.res.24h <- res_24_vs_con %>%
+    mutate(expr = case_when(
+    avg_log2FC >= expr_level & p_val_adj < 0.05 ~ "24h_UP",
+    avg_log2FC <= -expr_level & p_val_adj < 0.05 ~ "24h_DOWN",
+    T ~ "NS"
+  ))
+  res_48_vs_24 <- FindMarkers(data,ident.1 =  "48h",ident.2 = "24h")
+  up.res.48h <- res_48_vs_24 %>%
+    mutate(expr = case_when(
+    avg_log2FC >= expr_level & p_val_adj < 0.05 ~ "48h_UP",
+    avg_log2FC <= -expr_level & p_val_adj < 0.05 ~ "48h_DOWN",
+    T ~ "NS"
+  ))
+  up_and_down <- intersect(rownames(up.res.24h[up.res.24h$expr == "24h_UP",]),
+                           rownames(res_48_vs_24[up.res.48h$expr == "48h_DOWN",]))
+  down_and_up <- intersect(rownames(up.res.24h[up.res.24h$expr == "24h_DOWN",]),
+                           rownames(res_48_vs_24[up.res.48h$expr == "48h_UP",]))
+  still_up <- intersect(rownames(up.res.24h[up.res.24h$expr == "24h_UP",]),
+                           rownames(res_48_vs_24[up.res.48h$expr == "48h_UP",]))
+  still_down <- intersect(rownames(up.res.24h[up.res.24h$expr == "24h_DOWN",]),
+                           rownames(res_48_vs_24[up.res.48h$expr == "48h_DOWN",]))
+  return(list(up_down = up_and_down,
+              down_up = down_and_up,
+              up = still_up,
+              down = still_down))
+}
+
+myo_res <- revert_gene(nsmc_T,"NKT",0.5)
+
+table(nsmc_T@meta.data$cell_name)
+```
+
+
+#基因表达
+```{r}
+VlnPlot(pbmc, features = c("MS4A1", "CD79A"))
+FeaturePlot(pbmc, features = c("MS4A1", "CD79A"))
+RidgePlot(pbmc, features = c("MS4A1", "CD79A"), ncol = 1)
+DotPlot(pbmc, features = unique(features)) + RotatedAxis()
+DoHeatmap(subset(pbmc, downsample = 100), features = features, size = 3)
+```
+##多基因表达
+```{r}
+FeaturePlot(data,c(),blend = T)
+
+```
+
+```{r}
+library(ggnewscale)
+
+feature = c("Tpsg1","Muc2","Muc3") # 你需要填充这个向量
+mydata <- goblet_sub@reductions$umap@cell.embeddings
+myexpr <- as.data.frame(goblet_sub@assays$RNA@data)[feature,] %>% t()
+mydata <- cbind(mydata, myexpr) %>% as.data.frame()
+
+colors <- c('#8A2BE2', 'red', '#228B22') # 你可以根据需要扩展这个颜色向量
+
+p <- ggplot(mydata, aes(x=UMAP_1, y=UMAP_2))
+
+for (i in seq_along(feature)) {
+  p <- p + 
+    new_scale('color') +
+    geom_point(data = mydata, aes_string(color=feature[i]), size=1) +
+    scale_color_gradient(feature[i], low = alpha('grey', 0.1), high = alpha(colors[i], 1))
+}
+
+p <- p + theme_bw()
+print(p)
+```
+
+
+#Mfuzz
+```{r}
+library(ClusterGVis)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+obj <- subset(Macrophage_sub,subset = cell_name == "MDM")
+
+obj <- FindVariableFeatures(obj, nfeatures=3000)
+gene.use <- VariableFeatures(obj)
+
+ave <- AverageExpression(obj, group.by = "group", assays=c("RNA"), features=gene.use)
+
+ingene <- ave$RNA
+gene_tpm <- data.matrix(ingene)
+
+#Mfuzz 用的数据格式
+eset <- new("ExpressionSet", exprs = gene_tpm)
+
+cm <- clusterData(exp = eset,
+                  cluster.method = "mfuzz",
+                  cluster.num = 9)
+
+visCluster(cm,plot.type = "line",ncol = 3)+xlab("Mfuzz result")
+
+```
+
+```{r}
+plot_path <- "./Macrophage/figure/Mfuzz_up_down_MDM.tiff"
+xlab_title <- paste0("Mfuzz result of ","MDMs")
+tiff(plot_path,width = 20, height = 15, units = "in", res = 300)
+visCluster(cm,plot.type = "line",ncol = 3)+xlab(xlab_title)
+dev.off()
+```
+
+
+```{r}
+head(cm$wide.res)
+
+a <- 3
+b <- 9
+
+# 对a和b进行富集分析
+enrich_a <- enrichGO(
+  gene = cm$wide.res[cm$wide.res$cluster==a,]$gene,
+  keyType = "SYMBOL",
+  OrgDb = org.Mm.eg.db,
+  ont = "BP"
+)
+
+enrich_b <- enrichGO(
+  gene = cm$wide.res[cm$wide.res$cluster==b,]$gene,
+  keyType = "SYMBOL",
+  OrgDb = org.Mm.eg.db,
+  ont = "BP"
+)
+
+# 选择前5或10个通路
+top_a <- head(enrich_a, 10)
+top_b <- head(enrich_b, 10)
+
+# 添加分组列
+top_a$group <- "Upregulated"
+top_b$group <- "Downregulated"
+
+# 将b的count取负数
+top_b$Count <- -top_b$Count
+
+# 合并两个数据框
+combined_df <- rbind(top_a, top_b)
+
+# 使用ggplot2绘制bar图
+p <- ggplot(combined_df, aes(x = reorder(Description, Count), y = Count, fill = group)) +
+  geom_bar(stat = "identity") +
+  coord_flip() +
+  labs(y = "Count", x = "Pathway", fill = "Gene Set") +
+  theme_minimal()+
+  theme(axis.text.y = element_text(face = "bold"),
+        axis.title.y = element_text(size = 14)) +
+  scale_fill_manual(values = c("#2f4e87","#af2934"))+
+  scale_y_continuous(labels = function(x) abs(x))
+
+p
+```
+
+```{r}
+tiff("./Macrophage/figure/enrich_up_down_MDM.tiff",width = 10, height = 7, units = "in", res = 300)
+p
+dev.off()
+
+```
+
+
+#tiff
+```{r}
+tiff("./all_enterocyte/figure/goblet_pseudotime_plot.tiff",width = 20, height = 15, units = "in", res = 300)
+plot_cells(cds,color_cells_by = "pseudotime",label_branch_points = F,label_leaves = F)
+dev.off()
+
+dev.copy(tiff,paste0(path,file_head,"/",file_head,"_dotplot_overarching_interaction_strength.tiff"),width = 12,height = 8,res=300,units = "in")
+dev.off()
+```
+

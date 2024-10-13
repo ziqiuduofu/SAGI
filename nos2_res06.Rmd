@@ -1,0 +1,5652 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Ctrl+Shift+Enter*. 
+
+```{r}
+library(Seurat)
+library(openxlsx)
+library(ggplot2)
+library(ComplexHeatmap)
+library(circlize)
+library(DESeq2)
+library(clusterProfiler)
+library(biomaRt)
+library(org.Mm.eg.db)
+library(edgeR)
+library(stringr)
+library(cowplot)
+library(hdf5r)
+library(SeuratDisk)
+library(reticulate)
+library(sceasy)
+library(patchwork)
+```
+
+```{r}
+library(CellChat)
+library(hdWGCNA)
+library(monocle3)
+library(enrichR)
+library(GeneOverlap)
+library(tidyverse)
+```
+
+#数据
+```{r}
+ns2_data <- readRDS("./multi_res06_rms2_combined.rds")
+
+slotNames(ns2_data)
+
+ns2_data@meta.data$group <- "unknown"
+
+ns2_data@meta.data$group[ns2_data@meta.data$orig.ident %in% c("D_C_C1", "D_C_C2", "D_C_C3")] <- "Control"
+ns2_data@meta.data$group[ns2_data@meta.data$orig.ident %in% c("D_C_F1", "D_C_F2", "D_C_F3")] <- "24h"
+ns2_data@meta.data$group[ns2_data@meta.data$orig.ident %in% c("D_C_S1", "D_C_S2", "D_C_S3")] <- "48h"
+
+ns2_data@meta.data$group <- factor(ns2_data@meta.data$group,levels = c("Control","24h","48h"))
+
+
+
+
+
+DimPlot(object = ns2_data,split.by = "group",label = T)
+
+View(ns2_data@meta.data)
+```
+
+
+```{r}
+cluster_info <- data.frame(cluster = numeric(32), Control = numeric(32), first = numeric(32), second = numeric(32))
+
+for (i in 0:31) {
+  cluster_info$cluster[i+1] <- i
+  cluster_info$Control[i+1] <- sum(ns2_data@meta.data$group[ns2_data@meta.data$seurat_clusters == i]=="Control")
+  cluster_info$first[i+1] <- sum(ns2_data@meta.data$group[ns2_data@meta.data$seurat_clusters == i]=="24h")
+  cluster_info$second[i+1] <- sum(ns2_data@meta.data$group[ns2_data@meta.data$seurat_clusters == i]=="48h")
+}
+write.xlsx(cluster_info,"./cluster_cell_number_per_group.xlsx",overwrite = T,colNames = TRUE)
+
+
+sum(ns2_data@meta.data$group[ns2_data@meta.data$seurat_clusters == "12"]=="Control")
+
+table(ns2_data@meta.data$group[ns2_data@meta.data$seurat_clusters == 12])
+table(ns2_data@meta.data$group)
+
+```
+
+```{r}
+cluster_def_info <- read.xlsx("./nos2_cluster_defined.xlsb.xlsx",sheet = 3,colNames = T)[-33,]
+colnames(cluster_def_info)[5] <- "cell_type"
+
+#将细胞类型加入到metadata
+ns2_data@meta.data$cell_type <- cluster_def_info[ns2_data@meta.data$seurat_cluster, "cell_type"]
+
+
+saveRDS(ns2_data,"./ns2_data.rds")
+nos2 <- readRDS("./ns2_data.rds")
+
+
+
+
+```
+
+#分组后整合数据读取
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+View(nos2@meta.data)
+
+ 
+
+table(nos2@meta.data$cell_type)
+
+
+```
+
+#细胞大类的图
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+
+View(nos2@meta.data)
+table(nos2@meta.data$cell_type)
+
+pdf("./cell_type_dimplot.pdf",width = 15,height = 8)
+DimPlot(nos2,group.by = "cell_type",split.by = "group",label = T)
+dev.off()
+
+TSNEPlot(nos2,group.by = "cell_type",split.by = "group")
+
+PCAPlot(nos2,group.by = "cell_type",split.by = "group")
+
+DimPlot(nos2,split.by = "group",label = T,group.by = "cell_type")
+
+
+
+# 从Seurat对象中提取元数据
+metadata <- nos2@meta.data 
+
+# 计算每个分组中各个cell_type的百分比
+grouped_metadata <- metadata %>%
+  group_by(group, cell_type) %>%
+  summarise(n = n()) %>%
+  mutate(freq = n / sum(n)) # freq 列是每个cell_type在其分组中的频率（即百分比）
+
+
+
+#cell_type的特征基因
+pdf("./figure_defined/figure1/cell_type_expression_gene.pdf")
+VlnPlot(nos2,features = c("Cd3g","Csf1r","Cd79a","Fabp2","Lyve1","Sox10","Acta2","Col1a1","Pdgfra"),group.by = "cell_type",pt.size = 0,stack = T,flip = T)
+dev.off()
+```
+
+
+
+```{r}
+# 首先计算每个分组中每种细胞类型的百分比
+grouped_metadata <- metadata %>%
+  group_by(group, cell_type) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(group) %>%
+  mutate(freq = n / sum(n))
+
+# 针对每个细胞类型计算24h和Control，48h和24h的变化比例
+change_ratio <- grouped_metadata %>%
+  group_by(cell_type) %>%
+  summarise(`24h_vs_Control` = (freq[group == "24h"] - freq[group == "Control"]) / freq[group == "Control"],
+            `48h_vs_24h` = (freq[group == "48h"] - freq[group == "24h"]) / freq[group == "24h"], .groups = "drop")
+
+write.xlsx(change_ratio,"./figure_defined/all_group_change_ratio.xlsx")
+
+
+```
+
+```{r}
+nos2.marker <- read.xlsx("./nos2_cluster_defined.xlsx",sheet = 2)
+```
+```{r}
+# Set cell_type as the active identity
+Idents(nos2) <- "cell_type"
+
+# Now find markers for each cell type
+marker_list <- list()
+for (i in seq_along(cell_types)) {
+  markers <- FindMarkers(nos2, ident.1 = cell_types[i])
+  markers <- head(markers, n = 5)  # Get top 5 genes
+  marker_list[[cell_types[i]]] <- markers
+}
+
+heatmap_gene <- c(rownames(marker_list[[1]]),rownames(marker_list[[2]]),
+                  rownames(marker_list[[3]]),rownames(marker_list[[4]]),
+                  rownames(marker_list[[5]]))
+
+# 提取基因表达数据
+gene_matrix <- nos2[["RNA"]]@data[heatmap_gene, ]
+
+
+
+# 使用pheatmap包进行绘图
+pheatmap::pheatmap(gene_matrix,
+                   cluster_rows = TRUE,  # 对行（基因）进行聚类
+                   cluster_cols = TRUE,  # 对列（样本）进行聚类
+                   scale = "row")  # 对行进行规范化
+
+```
+
+
+#多组cellchat
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+
+nos2@meta.data$seurat_clusters <- as.numeric(nos2@meta.data$seurat_clusters) + 1
+
+nos2.con <- subset(nos2,subset = group == "Control")
+nos2.24h <- subset(nos2,subset = group == "24h")
+nos2.48h <- subset(nos2,subset = group == "48h")
+
+runCellChat <- function(nos2) {
+    cellchat <- createCellChat(nos2, group.by = "cell_type", meta = nos2@meta.data)
+    CellChatDB <- CellChatDB.mouse
+    cellchat@DB <- CellChatDB
+    cellchat <- subsetData(cellchat)
+    cellchat <- identifyOverExpressedGenes(cellchat)
+    cellchat <- identifyOverExpressedInteractions(cellchat)
+    cellchat <- computeCommunProb(cellchat)
+    cellchat <- filterCommunication(cellchat, min.cells = 10)
+    cellchat <- computeCommunProbPathway(cellchat)
+    cellchat <- aggregateNet(cellchat)
+    return(cellchat)
+}
+
+cellchat.con <- runCellChat(nos2.con)
+cellchat.24h <- runCellChat(nos2.24h)
+cellchat.48h <- runCellChat(nos2.48h)
+
+
+
+object.list <- list(group1 = cellchat.con, group2 = cellchat.24h, group3 = cellchat.48h)
+
+object.list = lapply(object.list, function(x){
+  x = netAnalysis_computeCentrality(x)
+})
+
+cellchat <- mergeCellChat(object.list, add.names = names(object.list), cell.prefix = TRUE)
+
+saveRDS(cellchat,"./cellchat/multi_group/multi_cellchat_data.rds")
+saveRDS(object.list,"./cellchat/multi_group/object.list.rds")
+
+library(CellChat)
+library(Seurat)
+library(tidyverse)
+library(ggplot2)
+cellchat <- readRDS("./cellchat/multi_group/multi_cellchat_data.rds")
+object.list <- readRDS("./cellchat/multi_group/object.list.rds")
+
+
+#相互作用的差异数量或相互作用强度可以使用circle plot来可视化
+#红色(或蓝色)颜色的边表示第二个数据集中与第一个数据集相比增加(或减少)的信号
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T,comparison = c(1,2))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(1,2))
+mtext("strength_compared_con.vs.24h", side = 1, line = 0)
+dev.copy(pdf,paste0(path,"strength_compared_con.vs.24h.pdf"))
+dev.off()
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T,comparison = c(2,3))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(2,3))
+mtext("strength_compared_24h.vs.48h", side = 1, line = 0)
+dev.copy(pdf,paste0(path,"strength_compared_24h.vs.48h.pdf"))
+dev.off()
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T,comparison = c(1,3))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(1,3))
+mtext("strength_compared_con.vs.48h", side = 1, line = 0)
+dev.copy(pdf,paste0(path,"strength_compared_con.vs.48h.pdf"))
+dev.off()
+```
+
+```{r}
+#热图更详细地显示相互作用的差异数量或相互作用强度
+#顶部的彩色条形图表示热图（incoming, 传入信号）中显示的数值列的和。
+#右边的彩色条形图表示一行值的和（outgoing,输出信号）。
+#在颜色条中，红色(或蓝色)表示与第一个数据集相比，第二个数据集中的信号增加(或减少)
+gg1 <- netVisual_heatmap(cellchat,comparison = c(1,2))
+gg2 <- netVisual_heatmap(cellchat, measure = "weight",comparison = c(1,2))
+gg1 + gg2
+pdf(paste0(path,"heatmap.con.vs.24h.pdf"),width = 8,height = 5)
+gg1 + gg2
+dev.off()
+
+gg3 <- netVisual_heatmap(cellchat,comparison = c(1,3))
+gg4 <- netVisual_heatmap(cellchat, measure = "weight",comparison = c(1,3))
+gg3 + gg4
+pdf(paste0(path,"heatmap.24h.vs.48h.pdf"),width = 8,height = 5)
+gg3 + gg4
+dev.off()
+
+gg5 <- netVisual_heatmap(cellchat,comparison = c(2,3))
+gg6 <- netVisual_heatmap(cellchat, measure = "weight",comparison = c(2,3))
+gg5 + gg6
+pdf(paste0(path,"heatmap.con.vs.48h.pdf"),width = 8,height = 5)
+gg5 + gg6
+dev.off()
+```
+
+
+
+```{r}
+# 总览性circle plot
+weight.max <- getMaxWeight(object.list, attribute = c("idents","count"))
+par(mfrow = c(1,length(object.list)), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_circle(object.list[[i]]@net$count, weight.scale = T, label.edge= F, edge.weight.max = weight.max[2], edge.width.max = 12, title.name = paste0("Number of interactions - ", names(object.list)[i]))
+}
+dev.copy(pdf,paste0(path,"overarching_interaction_strength.pdf"),width = 12,height = 8)
+dev.off()
+
+#不同细胞间相互作用次数或相互作用强度的差异
+num.link <- sapply(object.list, function(x) {rowSums(x@net$count) + colSums(x@net$count)-diag(x@net$count)})
+weight.MinMax <- c(min(num.link), max(num.link)) # control the dot size in the different datasets
+gg <- list()
+for (i in 1:length(object.list)) {
+  gg[[i]] <- netAnalysis_signalingRole_scatter(object.list[[i]], title = names(object.list)[i], weight.MinMax = weight.MinMax)
+}
+patchwork::wrap_plots(plots = gg)
+dev.copy(pdf,paste0(path,"dotplot_overarching_interaction_strength.pdf"),width = 12,height = 8)
+dev.off()
+```
+
+```{r}
+#识别和分组相关的
+levels(cellchat@idents$group1)
+cellchat@netP$group1$pathways
+gg1 <- netAnalysis_signalingChanges_scatter(cellchat, comparison = c(1,3),idents.use = "Mesenchymal cell", signaling.exclude = "THBS")
+gg2 <- netAnalysis_signalingChanges_scatter(cellchat, comparison = c(1,3),idents.use = "B/Plasma cell", signaling.exclude = c("THBS"))
+patchwork::wrap_plots(plots = list(gg1,gg2))
+
+
+cellchat <- computeNetSimilarityPairwise(cellchat, type = "functional")
+#> Compute signaling network similarity for datasets 1 2
+cellchat <- netEmbedding(cellchat, umap.method = 'uwot',type = "functional")
+#> Manifold learning of the signaling networks for datasets 1 2
+cellchat <- netClustering(cellchat, type = "functional",do.parallel=FALSE)
+#> Classification learning of the signaling networks for datasets 1 2
+# Visualization in 2D-space
+netVisual_embeddingPairwise(cellchat, type = "functional", label.size = 3.5,dot.size = c(2,6))
+#> 2D visualization of signaling networks from datasets 1 2
+
+cellchat <- computeNetSimilarityPairwise(cellchat, type = "structural",comparison = c(1,2))
+cellchat <- netEmbedding(cellchat, type = "structural",umap.method = 'uwot',comparison = c(1,2))
+cellchat <- netClustering(cellchat, type = "structural",comparison = c(1,2),do.parallel=FALSE)
+netVisual_embeddingPairwise(cellchat, type = "structural", label.size = 3.5,comparison = c(1,2))
+
+#计算并可视化学习关节流形中的路径距离
+rankSimilarity(cellchat, type = "functional",comparison1 = c(1, 2, 3),comparison2 = c(2,3))
+rankSimilarity(cellchat, type = "structural",comparison1 = c(1, 2, 3),comparison2 = c(2,3))
+
+#识别和可视化保守的和上下文特定的信号通路
+##比较各个信号通路的总体信息流
+gg1 <- rankNet(cellchat, mode = "comparison", stacked = T, do.stat = TRUE,comparison = c(1,3))
+gg2 <- rankNet(cellchat, mode = "comparison", stacked = F, do.stat = TRUE,comparison = c(1,3))
+gg1 + gg2
+
+##比较与每个细胞群相关的传出outgoing（或传入incoming）信号
+###outgoing
+i = 1
+pathway.union <- union(object.list[[i]]@netP$pathways, object.list[[i+1]]@netP$pathways)
+pathway.union <- union(pathway.union, object.list[[i+2]]@netP$pathways)
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "outgoing", signaling = pathway.union, title = names(object.list)[i])
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "outgoing", signaling = pathway.union, title = names(object.list)[i+1])
+ht3 = netAnalysis_signalingRole_heatmap(object.list[[i+2]], pattern = "outgoing", signaling = pathway.union, title = names(object.list)[i+2])
+draw(ht1 + ht2 + ht3, ht_gap = unit(0.5, "cm"))
+
+###incoming
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "incoming", 
+                                        signaling = pathway.union, title = names(object.list)[i],
+                                        width = 10, height = 12, color.heatmap = "GnBu")
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "incoming",
+                                        signaling = pathway.union, title = names(object.list)[i+1],
+                                        width = 10, height = 12, color.heatmap = "GnBu")
+ht3 = netAnalysis_signalingRole_heatmap(object.list[[i+2]], pattern = "incoming", 
+                                        signaling = pathway.union, title = names(object.list)[i+2],
+                                        width = 10, height =12, color.heatmap = "GnBu")
+draw(ht1 + ht2 + ht3, ht_gap = unit(0.5, "cm"))
+
+
+###all
+ht1 = netAnalysis_signalingRole_heatmap(object.list[[i]], pattern = "all", 
+                                        signaling = pathway.union, title = names(object.list)[i], 
+                                        width = 12, height = 15, color.heatmap = "OrRd")
+ht2 = netAnalysis_signalingRole_heatmap(object.list[[i+1]], pattern = "all",
+                                        signaling = pathway.union, title = names(object.list)[i+1], 
+                                        width = 12, height = 15, color.heatmap = "OrRd")
+ht3 = netAnalysis_signalingRole_heatmap(object.list[[i+2]], pattern = "all", 
+                                        signaling = pathway.union, title = names(object.list)[i+2], 
+                                        width = 12, height = 15, color.heatmap = "OrRd")
+draw(ht1 + ht2 + ht3, ht_gap = unit(0.5, "cm"))
+
+
+#通过比较通讯概率来识别故障信号
+netVisual_bubble(cellchat, sources.use = 4, targets.use = c(1,3,5,6,7),  comparison = c(1, 3), angle.x = 45,signaling = c("APP","THBS","FN1"))
+netVisual_bubble(cellchat, sources.use = 4, targets.use = c(1,3,5,6,7),  comparison = c(1, 3), angle.x = 45)
+
+levels(cellchat@idents$group1)
+cellchat@netP$group1$pathways
+
+gg1 <- netVisual_bubble(cellchat, sources.use = 4, targets.use = c(1,2,3,5,6,7),  comparison = c(1, 3), max.dataset = 3, title.name = "Increased signaling in LS", angle.x = 45, remove.isolate = T)
+gg2 <- netVisual_bubble(cellchat, sources.use = 4, targets.use = c(1,2,3,5,6,7),  comparison = c(1, 3), max.dataset = 1, title.name = "Decreased signaling in LS", angle.x = 45, remove.isolate = T)
+gg1 + gg2
+
+
+
+#=====================================================
+#通过差异表达分析识别功能失调信号
+## 定义两个组
+group1 = "group1"
+group2 = "group2"
+
+## 进行差异表达分析
+##pos.dataset 应该是有着阳性fold change的组
+pos.dataset = group2
+features.name = paste0(group1, "_vs_", group2)
+cellchat <- identifyOverExpressedGenes(cellchat, group.dataset = "datasets", pos.dataset = pos.dataset, features.name = features.name, only.pos = FALSE, thresh.pc = 0.1, thresh.fc = 0.1, thresh.p = 1)
+
+## 映射差异表达结果到推断的细胞间通信上
+net <- netMappingDEG(cellchat, features.name = features.name)
+
+## 提取配体-受体对
+net.up <- subsetCommunication(cellchat, net = net, datasets = group2, ligand.logFC = 0.2, receptor.logFC = NULL)
+net.down <- subsetCommunication(cellchat, net = net, datasets = group1, ligand.logFC = -0.1, receptor.logFC = -0.1)
+
+## 进行解构以获取单个信号基因
+gene.up <- extractGeneSubsetFromPair(net.up, cellchat)
+gene.down <- extractGeneSubsetFromPair(net.down, cellchat)
+
+## 可视化上调和下调的信号配体-受体对
+pairLR.use.up = net.up[, "interaction_name", drop = F]
+gg1 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.up, sources.use = 4, targets.use = c(1,2,3,5,6,7), comparison = c(1, 2),  angle.x = 90, remove.isolate = T, title.name = paste0("Up-regulated signaling in ", group2, " vs ", group1))
+
+pairLR.use.down = net.down[, "interaction_name", drop = F]
+gg2 <- netVisual_bubble(cellchat, pairLR.use = pairLR.use.down, sources.use = 4, targets.use = c(1,2,3,5,6,7), comparison = c(1, 2),  angle.x = 90, remove.isolate = T, title.name = paste0("Down-regulated signaling in ", group2, " vs ", group1))
+# 打印结果
+print(gg1 + gg2)
+
+#用弦图展示上升下调的通路
+##object.list[[]]中定义组别
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_chord_gene(object.list[[2]],
+                     sources.use = 4,targets.use = c(1,2,3,5,6,7),
+                     slot.name = 'net',net = net.up, 
+                     lab.cex = 0.8,small.gap = 3.5,
+                     title.name = paste0("Up-regulated signaling in ",names(object.list)[2]))
+netVisual_chord_gene(object.list[[1]],
+                     sources.use = 4, targets.use = c(1,2,3,5,6,7),
+                     slot.name = 'net', net = net.down,
+                     lab.cex = 0.8, small.gap = 3.5,
+                     title.name = paste0("Down-regulated signaling in ", names(object.list)[1]))
+
+
+par(mfrow = c(1,2), xpd=TRUE)
+# visualize the enriched ligands in the first condition
+p1 = computeEnrichmentScore(net.down, species = 'mouse')
+
+# visualize the enriched ligands in the second condition
+p2 = computeEnrichmentScore(net.up, species = 'mouse')
+
+
+#=========================================================
+
+#circle plot
+cellchat@netP$group1$pathways
+pathways.show <- c("LAMININ") 
+weight.max <- getMaxWeight(object.list, slot.name = c("netP"), attribute = pathways.show) # control the edge weights across different datasets
+par(mfrow = c(1,3), xpd=TRUE)
+for (i in 1:length(object.list)) {
+ netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "circle", edge.weight.max = weight.max[1], edge.width.max = 10, signaling.name = paste(pathways.show, names(object.list)[i]))
+}
+
+#heatmap
+pathways.show <- c("LAMININ") 
+par(mfrow = c(1,3), xpd=TRUE)
+ht <- list()
+for (i in 1:length(object.list)) {
+  ht[[i]] <- netVisual_heatmap(object.list[[i]], signaling = pathways.show, color.heatmap = "Reds",title.name = paste(pathways.show, "signaling ",names(object.list)[i]))
+}
+ComplexHeatmap::draw(ht[[1]] + ht[[2]] + ht[[3]], ht_gap = unit(0.5, "cm"))
+
+# Chord diagram 1
+pathways.show <- c("APP") 
+par(mfrow = c(1,3), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  png(filename = paste0(path,"chord_diagram_", i, ".png"), width = 1600, height = 1200) # 设置图像的大小
+  netVisual_aggregate(object.list[[i]], signaling = pathways.show, layout = "chord", signaling.name = paste(pathways.show, names(object.list)[i]))
+  dev.off() # 关闭图形设备，保存图像
+}
+
+
+# Chord diagram 2
+group.cellType <- c(rep("FIB", 4), rep("DC", 4), rep("TC", 4)) # grouping cell clusters into fibroblast, DC and TC cells
+names(group.cellType) <- levels(object.list[[1]]@idents)
+pathways.show <- c("CXCL") 
+par(mfrow = c(1,2), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_chord_cell(object.list[[i]], signaling = pathways.show, 
+                       group = group.cellType, 
+                       title.name = paste0(pathways.show, " signaling network - ", names(object.list)[i]))
+}
+
+# Chord diagram 3
+par(mfrow = c(1, 2), xpd=TRUE)
+# compare all the interactions sending from Inflam.FIB to DC cells
+for (i in 1:length(object.list)) {
+  netVisual_chord_gene(object.list[[i]], sources.use = 4, targets.use = c(5:8), lab.cex = 0.5, title.name = paste0("Signaling from Inflam.FIB - ", names(object.list)[i]))
+}
+
+# Chord diagram 4
+# compare all the interactions sending from fibroblast to inflamatory immune cells
+par(mfrow = c(1, 3), xpd=TRUE)
+for (i in 1:length(object.list)) {
+  netVisual_chord_gene(object.list[[i]], sources.use = c(1,2,3), targets.use = c(4,5,6,7),  title.name = paste0("Signaling received by Inflam.DC and .TC - ", names(object.list)[i]), legend.pos.x = 10)
+}
+
+#=====================================================
+#比较信号基因在不同数据集之间的表达分布
+# Vlnplot
+cellchat@meta$datasets = factor(cellchat@meta$datasets, levels = c("group1", "group2","group3")) # set factor level
+plotGeneExpression(cellchat, signaling = "CCL", split.by = "datasets", colors.ggplot = T)
+
+cellchat@netP$group1$pathways
+```
+
+
+
+
+#cellphonedb受配体分析
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+dir.create("cellphonedb")
+
+
+py_config()
+
+use_python("G:/minicoda/envs/cpdb/python.exe")
+
+py_config()
+
+sceasy::convertFormat(nos2, from="seurat", to="anndata",
+                       outFile='./cellphonedb/nos2.h5ad')
+
+
+rownames(nos2@meta.data)[1:5]
+
+#准备cpdb数据
+Idents(nos2) <- nos2$cell_type
+
+# Save normalised counts - NOT scaled!
+writeMM(nos2@assays$RNA@data, file = './cellphonedb/nos2_matrix.mtx')
+# save gene and cell names
+write(x = rownames(so@assays$RNA@data), file = "endometrium_example_counts_mtx/features.tsv")
+write(x = colnames(so@assays$RNA@data), file = "endometrium_example_counts_mtx/barcodes.tsv")
+
+
+
+```
+
+
+
+
+
+#T细胞亚组分析
+##整体分析
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+View(nos2@meta.data)
+sam.name <- "T_cell"
+dir.create(sam.name)
+dir.create(paste0("./",sam.name,"/data"))
+dir.create(paste0("./",sam.name,"/subset"))
+
+# 创建一个只包含 "T cell" 的 Seurat 对象
+T_cell_data <- subset(nos2, subset = cell_type == "T cell")
+
+T_cell_data <- NormalizeData(T_cell_data)
+T_cell_data <- FindVariableFeatures(T_cell_data, 
+                                             selection.method = "vst",
+                                             nfeatures = 1000)
+
+
+T_cell_data <- ScaleData(T_cell_data)
+
+top10 <- head(x = VariableFeatures(Macrophage_data), 10)
+plot1 <- VariableFeaturePlot(Macrophage_data)
+plot2 <- LabelPoints(plot = plot1, points = top10)
+pdf(file = paste0("./",sam.name,"/",sam.name,"_Norm-feature_variableplot.pdf"),width = 12,height = 8)
+CombinePlots(plots = list(plot1, plot2),legend = "none")
+dev.off()
+
+# 运行 PCA
+T_cell_data <- RunPCA(T_cell_data, 
+                          features = VariableFeatures(object = T_cell_data))
+#PCA结果展示-1
+pdf(paste0("./",sam.name,"/",sam.name,"PCA-VizDimLoadings.pdf"),width = 7,height = 5)
+VizDimLoadings(T_cell_data, dims = 1:2, reduction = "pca")
+dev.off()
+#PCA结果展示-2
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot.pdf"),width = 10,height = 8)
+DimPlot(T_cell_data, reduction = "pca")
+dev.off()
+#PCA结果展示-3
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot_group.pdf"),width = 10,height = 8)
+DimPlot(T_cell_data, reduction = "pca",split.by = "group")
+dev.off()
+#PCA热图
+pcadim <- 15
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimHeatmap_","pcadim=",pcadim,".pdf"),width = 10,height = 8)
+DimHeatmap(T_cell_data, dims = 1:pcadim, cells = 500, balanced = TRUE)
+dev.off()
+
+T_cell_data <- JackStraw(T_cell_data,num.replicate = 100,dims = 40)
+pdf(paste0("./",sam.name,"/PCA-JackStrawPlot_40_",sam.name,".pdf"),width = 12,height = 10)
+JackStrawPlot(object = T_cell_data, dims = 1:40)
+dev.off()
+
+
+T_cell_data <- ScoreJackStraw(T_cell_data, dims = 1:40)
+pdf(paste0("./",sam.name,"/PCA-ElbowPlot_",sam.name,".pdf"),width = 6,height = 5)
+ElbowPlot(T_cell_data,ndims = 40)
+dev.off()
+
+
+
+dim.use = 1:15
+# 运行 t-SNE 或 UMAP 降维
+T_cell_data <- RunTSNE(T_cell_data, dims = dim.use)
+# 或者
+T_cell_data <- RunUMAP(T_cell_data, dims = dim.use)
+
+
+res = 0.4
+# 寻找聚类
+T_cell_data <- FindNeighbors(T_cell_data, dims = dim.use)
+T_cell_data <- FindClusters(T_cell_data, resolution = res)
+
+
+# 可视化结果
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"PC.pdf"),width = 5,height = 4)
+DimPlot(object = T_cell_data, pt.size=0.6,label = T)
+dev.off()
+
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"_split","PC.pdf"),width = 8,height = 5)
+DimPlot(object = T_cell_data, pt.size=0.6,label = T,split.by = "group")
+dev.off()
+
+
+
+#找差异基因
+T.cell<- FindAllMarkers(T_cell_data, only.pos = TRUE, 
+                              min.pct = 0.3, logfc.threshold = 0.25)
+write.table(T.cell,
+            file=paste0("./",sam.name,"/",sam.name,"_total_marker_genes_tsne_",as.character(res),"_",max(dim.use),"PC.txt"),
+            sep="\t",quote = F,row.names = F)
+
+
+# 计算每个实验组在每个 cluster 中的细胞数量
+cell_counts <- table(T_cell_data@meta.data$group, T_cell_data@meta.data$seurat_clusters)
+
+# 将数据转换为 data frame 并为列命名
+cell_counts_df <- as.data.frame.table(cell_counts)
+names(cell_counts_df) <- c("group", "cluster", "cell_count")
+
+# 计算每个 cluster 在每个 group 中的百分比
+cell_counts_df$percentage <- ave(cell_counts_df$cell_count, cell_counts_df$group, FUN = function(x) x / sum(x) * 100)
+
+# 对比两组中每个 cluster 的百分比
+pdf(paste0("./",sam.name,"/","resoluton=",res,"_",sam.name,"_cluster_percentage.pdf"))
+ggplot(cell_counts_df, aes(x = cluster, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  xlab("Cluster") +
+  ylab("Percentage of cells (%)") +
+  ggtitle(paste0("Percentage of cells in each cluster for ",sam.name)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+
+saveRDS(T_cell_data,paste0("./",sam.name,"/data/",sam.name,"_data.rds"))
+saveRDS(cell_counts_df,paste0("./",sam.name,"/data/",sam.name,"_count_df.rds"))
+write.xlsx(cell_counts_df,paste0("./",sam.name,"/",sam.name,"_count_df.xlsx"))
+
+T_cell_data <- readRDS("./T_cell/data/T_cell_data.rds")
+```
+##T细胞0-11 亚群
+
+```{r}
+sam.name <- "T_cell"
+
+
+for(clu_num in 3:11){
+  
+  cluster <- paste0("cluster",as.character(clu_num))
+  dir.create(paste0("./",sam.name,"/subset/",cluster))
+  
+#需要修改
+  df <- T_cell_data@meta.data[c("group", "seurat_clusters")]
+  df$is_cluster <- df$seurat_clusters == clu_num
+  contingency_table <- table(df$group, df$is_cluster)
+  chisq_test <- chisq.test(contingency_table)
+  
+  observed <- chisq_test$observed
+  expected <- chisq_test$expected
+  residuals <- (observed - expected) / sqrt(expected)
+  
+  significant_residuals <- which(abs(residuals) > 2, arr.ind = TRUE)
+  
+    # 创建并写入卡方检验和残差分析的结果
+  result_filename <- paste0("./",sam.name,"/subset/",cluster,"/cluster_test_result.xlsx")
+  df_to_write <- data.frame(
+    "Chi-square test result" = toString(chisq_test),
+    "Standardized residuals" = toString(residuals),
+    "Significant residuals (row and column indices)" = toString(significant_residuals)
+  )
+  write.xlsx(df_to_write, result_filename)
+
+  
+  # 以下是你原有的代码，我假设它们在这个循环中应该保持不变
+  # 取出你感兴趣的群体
+#需要修改
+  cluster_data <- subset(T_cell_data, subset = seurat_clusters == clu_num & group %in% c("Control","24h", "48h"))
+  cluster_data <- subset(cluster_data, subset = nFeature_RNA > 200)
+  cluster_data <- cluster_data[ , cluster_data$nCount_RNA > 0]
+  
+  # 将数据转换为DESeqDataSet
+  dds <- DESeqDataSetFromMatrix(countData = cluster_data@assays$RNA@counts,
+                              colData = cluster_data@meta.data,
+                              design = ~ group)
+  dds$group <- relevel(dds$group, ref = "Control")
+  # 进行差异表达分析
+  dds <- DESeq(dds)
+
+  # 获取差异表达的结果
+  res <- results(dds)
+  res_df <- as.data.frame(res)
+  write.xlsx(res_df,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG.xlsx"),rowNames = T)
+  saveRDS(res,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_deg_data.rds"))
+
+
+
+
+  #   选择显著差异表达的基因
+  sig_genes <- rownames(res)[res$pvalue < 0.05 & (abs(res$log2FoldChange) > 1)]
+  sig_genes <- sig_genes[!is.na(sig_genes)]
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_total_",as.character(length(sig_genes)),".txt"))
+  
+  res.Control.vs.24h <- results(dds, contrast = c("group", "24h", "Control"))
+  res.Control.vs.48h <- results(dds, contrast = c("group", "48h", "Control"))
+  res.24h.vs.48h <- results(dds, contrast = c("group", "48h", "24h"))
+  
+  sig_genes.Control.vs.24h <- rownames(res.Control.vs.24h)[which(res.Control.vs.24h$pvalue < 0.05 & abs(res.Control.vs.24h$log2FoldChange) > 1)]
+  sig_genes.Control.vs.48h <- rownames(res.Control.vs.48h)[which(res.Control.vs.48h$pvalue < 0.05 & abs(res.Control.vs.48h$log2FoldChange) > 1)]
+  sig_genes.24h.vs.48h <- rownames(res.24h.vs.48h)[which(res.24h.vs.48h$pvalue < 0.05 & abs(res.24h.vs.48h$log2FoldChange) > 1)]
+  
+  sig_genes.Control.vs.24h.48h <- union(sig_genes.Control.vs.24h, sig_genes.Control.vs.48h)
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_con_",as.character(length(sig_genes.Control.vs.24h.48h)),".txt"))
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_24h_",as.character(length(sig_genes.24h.vs.48h)),".txt"))
+
+  
+  mart <- readRDS("./mart.rds")
+  #开始算control vs 24 48
+  gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.Control.vs.24h.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_control <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control <- data.frame(ego_ALL_control)
+  ego_all_control <- ego_all_control[order(ego_all_control$p.adjust),]
+  ego_all_control <- ego_all_control %>%
+    arrange(desc(Count))
+  ego_all_control_top30 <- ego_all_control[1 : 30,]
+  p_con <- ggplot(data=ego_all_control_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  #开始计算
+  gene_result_24_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.24h.vs.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_24h <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h <- data.frame(ego_ALL_24h)
+  write.csv(ego_all_24h,paste0("./",sam.name,"/subset/",cluster,"/enrichGO_all_24h.csv"))
+  
+  ego_all_24h <- ego_all_24h[order(ego_all_24h$p.adjust),]
+  ego_all_24h <- ego_all_24h %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h[1 : 30,]
+
+  p_24h <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con,p_24h)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_allont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+
+  # BP富集
+  ego_ALL_control_BP <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control_bp <- data.frame(ego_ALL_control_BP)
+  ego_all_control_bp <- ego_all_control_bp[order(ego_all_control_bp$p.adjust),]
+  ego_all_control_bp <- ego_all_control_bp %>%
+    arrange(desc(Count))
+  ego_all_control_bp_top30 <- ego_all_control_bp[1 : 30,]
+  p_con_bp <- ggplot(data=ego_all_control_bp_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  
+  ego_ALL_24h_BP <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h_bp <- data.frame(ego_ALL_24h_BP)
+  ego_all_24h_bp <- ego_all_24h_bp[order(ego_all_24h$p.adjust),]
+  ego_all_24h_bp <- ego_all_24h_bp %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h_bp[1 : 30,]
+
+  p_24h_bp <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con_bp,p_24h_bp)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_bp_ont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+  #kegg
+  clu_kegg_con <- enrichKEGG(gene = na.omit(gene_result_con_vs$entrezgene_id), 
+                         organism = 'mmu')
+  clu_kegg_24h <- enrichKEGG(gene = na.omit(gene_result_24_vs$entrezgene_id), 
+                         organism = 'mmu')
+  
+  p_con1 <- barplot(clu_kegg_con, showCategory=12)
+  p_con2 <- dotplot(clu_kegg_con, showCategory=12)
+  plotc_1 = p_con1/p_con2
+  
+  p_con3 <- barplot(clu_kegg_24h, showCategory=12)
+  p_con4 <- dotplot(clu_kegg_24h, showCategory=12)
+  plotc_2 = p_con3/p_con4 
+  
+  try(p_combined_kegg <- plot_grid(plotc_1,plotc_2),silent = T)
+  
+  try(ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"enrich_KEGG.pdf"), plot = p_combined_kegg, width = 36, height = 30),silent = T)
+
+  
+  
+  #############################
+  
+  # 第一张图: 三个组别用sig_genes.Control.vs.24h.48h基因来做热图
+
+  exprs_data_1 <- cluster_data[["RNA"]]@data[sig_genes.Control.vs.24h.48h, ]
+
+  # 标准化数据
+  exprs_data_1 <- t(scale(t(exprs_data_1)))
+
+  # 添加分组信息
+  ha_1 = HeatmapAnnotation(df = data.frame(group = cluster_data@meta.data$group),
+                       col = list(group = c("Control" = "#00b0eb", "24h" = "#ffd401", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_1 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data@meta.data$group)))))
+
+  # 绘制热图
+  col_fun = circlize::colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+  heatmap_1 = Heatmap(exprs_data_1, 
+                  name = "expression", 
+                  top_annotation = ha_1, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_1)
+
+
+
+# 第二张图: 24h组和48h组用sig_genes.24h.vs.48h基因来做热图
+
+  cluster_data_2 <- subset(cluster_data, subset = group %in% c("24h", "48h"))
+
+  exprs_data_2 <- cluster_data_2[["RNA"]]@data[sig_genes.24h.vs.48h, ]
+
+  # 标准化数据
+  exprs_data_2 <- t(scale(t(exprs_data_2)))
+
+  # 添加分组信息
+  ha_2 = HeatmapAnnotation(df = data.frame(group = cluster_data_2@meta.data$group),
+                       col = list(group = c("24h" = "#3f60aa", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_2 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data_2@meta.data$group)))))
+
+  # 绘制热图
+  heatmap_2 = Heatmap(exprs_data_2, 
+                  name = "expression", 
+                  top_annotation = ha_2, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_2)
+
+
+
+  
+  pdf(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_heatmap.pdf"), width = 20, height = 15)
+  layout(matrix(1:2,2,1))
+  draw(heatmap_1, heatmap_legend_side = "bot")
+  draw(heatmap_2, heatmap_legend_side = "bot")
+  dev.off()
+}
+
+```
+
+
+
+
+
+
+
+
+
+
+
+##T细胞WGCNA
+```{r}
+T_cell_sub <- readRDS("T_cell/data/T_cell_sub.rds")
+
+
+
+seurat_obj <- SetupForWGCNA(
+    T_cell_sub,
+    gene_select = "fraction",
+    fraction = 0.05,
+    wgcna_name = "Tcell" # hdWGCNA实验名称
+)
+
+# 构造metacell
+seurat_obj <- MetacellsByGroups(
+    seurat_obj = seurat_obj,
+    group.by = c("cell_name","group"),  # 将来自同一Sample的同种cell_type构造成metacell
+    reduction = "umap", # 用于执行KNN算法，此处harmony为通过harmony校正过的PCA
+    k = 25, # KNN参数
+    max_shared = 10, # 两个metacell可共享的最大细胞数
+    ident.group = "cell_name",  # Idents名
+    min_cells = 25
+)
+
+# 标准化metacell表达矩阵
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+seurat_obj <- SetDatExpr(
+    seurat_obj,
+    group_name = c("nDNT","aDNT","NKT","Tcm","Trm"), # 挑选感兴趣的细胞类型，可以c("INH", "EX")挑选多个感兴趣的细胞类型
+    group.by = "cell_name", # INH所在的metadata列名
+    assay = "RNA",
+    slot = "data"
+)
+
+seurat_obj <- TestSoftPowers(
+    seurat_obj,
+    networkType = "signed" # 此外，还可选择“unsigned”或“signed hybrid”参数
+)
+
+plot_list <- PlotSoftPowers(seurat_obj)
+
+wrap_plots(plot_list, ncol=2)
+```
+
+```{r}
+seurat_obj <- ConstructNetwork(
+    seurat_obj, soft_power = 5, # 上图中黑色圆圈中的最佳软阈值
+    setDatExpr = FALSE,
+    tom_name = 'T_cell' # TOM矩阵名称，运行后会在当前目录生成一个TOM文件夹保存TOM矩阵
+)
+
+pdf("./T_cell/figure/T_cell_WGCNA_dendrogram.pdf")
+PlotDendrogram(seurat_obj, main='T_cell_dendrogram')
+dev.off()
+```
+
+
+```{r}
+TOM <- GetTOM(seurat_obj)
+
+TOM[1:4, 1:4]
+
+seurat_obj <- ScaleData(seurat_obj, features = VariableFeatures(seurat_obj))
+
+#耗时较久
+seurat_obj <- ModuleEigengenes(
+    seurat_obj,
+    group.by.vars = "group"  # 根据Sample去批次
+)
+
+seurat_obj <- ModuleConnectivity(
+    seurat_obj,
+    group.by = 'cell_name', group_name = c("nDNT","aDNT","NKT","Tcm","Trm")  # 这里继续计算INH（感兴趣的细胞类型）的kME
+)
+
+seurat_obj <- ResetModuleNames(
+    seurat_obj,
+    new_name = "T_cell_sub"
+)
+
+PlotKMEs(seurat_obj, ncol = 5, n_hubs = 10)
+```
+
+```{r}
+# get the module assignment table:
+modules <- GetModules(seurat_obj)
+
+# 通过GetHubGenes函数抽取每个模块的topN hub节点，即每个模块中kME高的topN个基因
+hub_df <- GetHubGenes(seurat_obj = seurat_obj, n_hubs = 10)
+
+# 至此，基本完成了hdWGCNA分析
+saveRDS(seurat_obj, file = './T_cell/data/hdWGCNA_T_cell.rds')
+seurat_obj <- readRDS("./T_cell/data/hdWGCNA_T_cell.rds")
+
+seurat_obj <- SetIdent(seurat_obj,value = "cell_name")
+VlnPlot(seurat_obj,c("Ccr7","S1pr1","Klf2","Hobit"),
+        stack = T,flip = T)
+
+```
+
+```{r}
+# 根据每个模块的topN个基因对细胞进行打分
+seurat_obj <- ModuleExprScore(
+    seurat_obj,
+    n_genes = 25, # topN hub genes
+    method = "Seurat" # 打分方法，分为Seurat、UCell
+)
+
+# 根据hMEs进行FeaturePlot
+plot_list <- ModuleFeaturePlot(
+    seurat_obj,
+    features = 'hMEs', # 可选择MEs、hMEs、scores、average
+    order = TRUE # order so the points with highest hMEs are on top
+)
+
+#  stitch together with patchwork
+wrap_plots(plot_list, ncol = 6)
+
+UMAPPlot(T_cell_sub)
+```
+
+```{r}
+# 模块相关性
+ModuleCorrelogram(seurat_obj)
+
+# 利用Seurat自带的可视化方法
+
+# get hMEs from seurat object
+MEs <- GetMEs(seurat_obj, harmonized=TRUE)
+mods <- colnames(MEs); mods <- mods[mods != 'grey']
+
+# add hMEs to Seurat meta-data:
+seurat_obj@meta.data <- cbind(seurat_obj@meta.data, MEs)
+
+p <- DotPlot(seurat_obj, features = mods, group.by = "cell_name")
+p <- p + 
+#     coord_flip() + # 反转x/y轴
+    RotatedAxis() + # 旋转坐标轴标签
+    scale_color_gradient2(high = "red", mid = "grey95", low = "blue")  # 改颜色
+pdf("./T_cell/figure/WGCNA_dotplot.pdf")
+print(p)
+dev.off()
+
+table(T_cell_sub@meta.data$cell_name)
+
+View(seurat_obj@misc$Tcell$wgcna_modules)
+table(seurat_obj@misc$Tcell$wgcna_modules$module)
+
+module_adnt <- rownames(seurat_obj@misc$Tcell$wgcna_modules[seurat_obj@misc$Tcell$wgcna_modules$module=="T_cell_sub4",])
+
+go_module_adnt <- enrichGO(module_adnt,
+                           keyType = "SYMBOL",
+                           ont = "BP",
+                           OrgDb = org.Mm.eg.db)
+
+dotplot(go_module_adnt)
+
+mart <- readRDS("./mart.rds")
+#开始算control vs 24 48
+gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                   filters = 'mgi_symbol', 
+                   values = module_adnt, 
+                   mart = mart)
+
+kegg_module_adnt <- enrichKEGG(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                              organism = "mmu",
+                              keyType = "kegg")
+dotplot(kegg_module_adnt)
+kegg_res <- as.data.frame(kegg_module_adnt)
+
+```
+
+```{R}
+p <- VlnPlot(
+    seurat_obj,
+    features = "T_cell_sub5",
+    group.by = "cell_name",
+    pt.size = 0
+)
+p <- p + geom_boxplot(width = .25, fill = "white")
+p <- p + xlab("") + ylab("hME") + NoLegend()
+p
+```
+
+```{r}
+library(igraph)
+
+ModuleNetworkPlot(seurat_obj = seurat_obj, mods = "T_cell_sub5")
+
+
+
+HubGeneNetworkPlot(
+    seurat_obj,
+    n_hubs = 3, # 用于可视化的hub gene
+    n_other = 5, # 随机选取的gene
+    edge_prop = 0.75, # 采样的边数
+    mods = "all"
+)
+
+# 将基因降维成UMAP图，该函数会在Seurat_obj@misc$wgcna_name中生成一个module_umap矩阵
+seurat_obj <- RunModuleUMAP(
+    seurat_obj, 
+    n_hubs = 10, # 用于UMAP嵌入的hub genes
+    n_neighbors = 15, # UMAP参数
+    min_dist = 0.1 # 两个点（基因）在UMAP空间中的最短距离
+)
+umap_df <- GetModuleUMAP(seurat_obj)
+
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2)) + # 设置坐标轴
+    geom_point(
+        color = umap_df$color, # 按module对点（gene）着色
+        size = umap_df$kME * 2 # 点的大小与其kME值相关
+    ) + 
+    umap_theme()
+
+
+pdf("./T_cell/figure/hdWGCNA_module_plot.pdf")
+ModuleUMAPPlot(
+    seurat_obj,
+    edge.alpha = 0.25,
+    sample_edges = T,
+    edge_prop = 0.1, # 采样10%的边用于可视化
+    label_hubs = 2, # 每个module用于展示的hub genes
+    keep_grey_edges = F
+)
+dev.off()
+
+```
+
+```{r}
+theme_set(theme_cowplot())
+
+# enrichr databases to test
+dbs <- c('GO_Biological_Process_2021','GO_Cellular_Component_2021','GO_Molecular_Function_2021')
+
+# perform enrichment tests
+seurat_obj <- RunEnrichr(
+  seurat_obj,
+  dbs=dbs, # character vector of enrichr databases to test
+  max_genes = 100 # number of genes per module to test
+)
+
+# retrieve the output table
+enrich_df <- GetEnrichrTable(seurat_obj)
+
+EnrichrBarPlot(
+  seurat_obj,
+  outdir = "enrichr_plots", # name of output directory
+  n_terms = 10, # number of enriched terms to show (sometimes more show if there are ties!!!)
+  plot_size = c(5,7), # width, height of the output .pdfs
+  logscale=TRUE # do you want to show the enrichment as a log scale?
+)
+
+EnrichrDotPlot(
+  seurat_obj,
+  mods = "all", # use all modules (this is the default behavior)
+  database = "GO_Biological_Process_2021", # this has to be one of the lists we used above!!!
+  n_terms=3 # number of terms for each module
+)
+
+```
+
+##T细胞GSEA
+
+##T细胞相关功能评分
+```{r}
+T_cell_sub <- readRDS("./T_cell/data/T_cell_sub.rds")
+
+#T细胞proliferation
+proliferation.genes <- c("Scrib", "Abl1", "Ager", "Arg1", "Btn1a1", "Casp3", "Cd24a", "Cd86", "Ephb6", "Epo", "Fadd", "Fyn", "Lilrb4b", "Lilrb4a", "Gpam", "Hmgb1", "Ido1", "Igf1", "Igf2", "Igfbp2", "Il12b", "Il12rb1", "Il18", "Il2", "Il2ra", "Il4", "Itgal", "Itgam", "Itgax", "Itgb2", "Jak3", "Laptm5", "Ppp3ca", "Prkar1a", "Prnp", "Satb1", "Stat5a", "Stat5b", "Tnfsf9", "Tnfsf4", "Btn2a2", "Rps3", "Slamf1", "Rc3h1", "Itgad", "Lrrc32", "Icosl", "Crtam", "Ripk3", "Pdcd1lg2", "Cd274", "Pycard", "Il23a")
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(proliferation.genes), name = "ProliferationScore")
+VlnPlot(object = T_cell_sub, features = "ProliferationScore1", group.by = "cell_name",split.by = "group")
+
+#T细胞Antigen_Presentation
+Antigen_Presentation.genes <- c("Hfe", "Icam1", "Kdm5d", "Trex1", "Was", "Treml4", "Unc93b1", "Rftn1")
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(Antigen_Presentation.genes), name = "AntigenPresentationScore")
+VlnPlot(object = T_cell_sub, features = "AntigenPresentationScore1", group.by = "cell_name",split.by = "group")
+
+
+#T cell migration
+#GOBP_T_CELL_MIGRATION
+Migration.genes <- c("Oxsr1","Abl1","Abl2","Adam10","Adam17","Adam8","Aif1","Aire","Apod","App","Rhoa","Ccr6","Coro1a","Cxcr3","Ccr2","Ccr7","Crk","Crkl","Ecm1","S1pr1","Fadd","Fut7","Icam1","Cxcl10","Itga4","Itgal","Itgb3","Itgb7","F11r","Lgals9","Xcl1","Cd99l2","Cd200","Msn","Plec","Ccl21a","Ripor2","Ccl2","Ccl20","Ccl5","Cxcl12","Slc12a2","Spn","Spns2","Tnfsf4","Wnt5a","Tnfrsf14","Wnk1","Myo1g","Gpr183","Tmem102","Lrch1","Tnfsf14","Il27ra","Stk39","Ccl26","Cxcl13","Ripk3","Cd200r1","Cxcl16","Pycard","","2610528A11Rik","Med23","Gpr15","Dock8","Selenok")
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(Migration.genes), name = "Migration")
+T_cell_sub@meta.data <- T_cell_sub@meta.data %>%
+  mutate(Migration = Migration1)
+VlnPlot(object = T_cell_sub, features = "Migration", group.by = "cell_name",split.by = "group",pt.size = 0)
+
+
+```
+
+
+```{r}
+#GOBP_IMMATURE_T_CELL_PROLIFERATION
+t.proliferation <- c("Blm","Bmi1","Bmp4","Cd1d1","Cdkn2a","Erbb2","Gnrh1","Ifnar2","Ihh","Il1a","Il1b","Ripk2","Foxp3","Shh","Tnfrsf9","Tnfsf9","Wnt4","Tmem131l","Clec4g")
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(t.proliferation), name = "T_cell_proliferation")
+T_cell_sub@meta.data <- T_cell_sub@meta.data %>%
+  rename(T_cell_proliferation = T_cell_proliferation1)
+VlnPlot(object = T_cell_sub, features = "T_cell_proliferation", group.by = "cell_name",split.by = "group")
+
+
+
+```
+
+
+
+```{r}
+#细胞数目减少的
+
+
+#内源性凋亡Intrinsic apoptosis
+#REACTOME_INTRINSIC_PATHWAY_FOR_APOPTOSIS
+intrinsicapoptosis.genes <- c("Aven", "Bax", "Bid", "Bcl2l1", "Dynll1", "Apip", "Gzmb", "Ywhab", "Ywhah", "Apaf1", "Dynll2", "Septin4", "Ywhae", "Nmt1", "Mapk8", "Ppp3cc", "Ywhaz", "Gsdmd", "Pmaip1", "Bad", "Casp7", "Xiap", "Casp8", "Bcl2l11", "Casp9", "Diablo", "Gsdme", "Casp3", "Ppp3r1", "Bmf", "Sfn", "Ywhag", "Bcl2", "Bak1", "Gm10053", "Mapk3", "Mapk1", "Cycs", "Ywhaq")
+
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(intrinsicapoptosis.genes), name = "intrinsicapoptosisscore")
+VlnPlot(object = T_cell_sub, features = "intrinsicapoptosisscore1", group.by = "cell_name",split.by = "group")
+
+#外源性凋亡Extrinsic apoptosis
+#GOBP_EXTRINSIC_APOPTOTIC_SIGNALING_PATHWAY
+extrinsicapoptosis.genes <- c("Unc5b","Fgb","Raf1","D1Pas1","Acvr1","Acvr1b","Parp2","Agt","Agtr2","Ar","Atf3","Bad","Bak1","Bax","Bcl10","Bcl2","Bcl2a1a","Bcl2a1b","Bcl2a1c","Bcl2a1d","Bcl2l1","Bcl2l10","Bcl2l2","Bex3","Bid","Bcl2l11","Bmp4","Bmpr1b","Brca1","Birc6","Casp2","Casp3","Casp7","Casp8","Ctnna1","Cav1","Runx3","Rb1cc1","Cflar","Col2a1","Csf2","Cttn","Dab2","Dapk3","Daxx","Dbh","Ddx3x","Erbb3","Eya1","Eya2","Eya3","Eya4","Fadd","Faf1","Fas","Fasl","Fem1b","Fga","Fgf10","Fgfr1","Fgfr3","Tlr3","Fyn","G0s2","Gas1","Gata1","Gdnf","Gclc","Gclm","Gpx1","Pdia3","Gstp2","Gstp1","Htt","Hgf","Hipk1","Hmox1","Hspa1b","Hyal2","Icam1","Ifng","Igf1","Il12a","Il18","Il1a","Il1b","Il2","Il3","Il4","Il7","Inhba","Itga6","Itgav","Jak2","Jak3","Krt18","Krt8","Lcn2","Lgals3","Lmna","Ltb","Ltbr","Sgk3","Smad3","Mal","Mcl1","Kitl","Mknk1","Mknk2","Nf1","Ngf","Nrp1","P2rx7","Pea15a","Pik3r1","Serpine1","Pml","Ppp1ca","Psen2","Psme3","Pten","Ptprc","Hspa1a","Rela","Ret","Ripk1","Rock2","Scg2","Cx3cl1","Sfrp2","Spi1","Sfrp1","Siah2","Skil","Snai2","Siglec1","Sort1","Sp100","Src","Stx4a","Nrg1","Tcf7l2","Agap2","Prdx2","Tmc8","Tert","Tgfb1","Tgfb2","Tgfbr1","Thbs1","Timp3","Tnf","Tnfaip3","Tnfrsf10b","Tnfrsf1b","Cd27","Tnfsf12","Dedd","Cd70","Traf1","Traf2","Tnfsf10","Tnfrsf4","Tnfsf4","Vegfa","Pak2","Gstp3","Yap1","Stradb","Madd","Zc3hc1","Faim","Map2k5","Mapk7","Peli3","Rbck1","Pak5","Casp8ap2","Tnfrsf12a","Bag3","Siva1","Il19","Gfral","Itprip","Acsl5","Gsdma3","Ppp2r1a","Srpx","Bok","Stk3","Foxo3","Gabarap","Gsk3b","Mllt11","Park7","Pidd1","Stk4","Pmaip1","Sh3rf1","Gsk3a","Faiml","Moap1","Itm2c","Htra2","Zfp110","Zmynd11","Bcl2l14","Pycard","Dele1","Ndufa13","Rffl","Dedd2","Rnf41","Ddx47","Zdhhc3","Fcmr","Dab2ip","Dapk1","Tmbim1","Tradd","Zswim2","Faim2","Rps6kb1","Bloc1s2","Ppp2r1b","Cyld","Bcl2l12","Gper1","Il33","Nol3","Tnfrsf23","Tnfrsf22","Wwox","Rnf34","Clca3a2","Nfkbiz","Sgpp1","Trps1","Phip","Hmgb2","Deptor","Fgg")
+
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(extrinsicapoptosis.genes), name = "extrinsicapoptosisscore")
+VlnPlot(object = T_cell_sub, features = "extrinsicapoptosisscore1", group.by = "cell_name",split.by = "group")
+
+#AICD 程序性死亡
+#GOBP_ACTIVATION_INDUCED_CELL_DEATH_OF_T_CELLS
+celldeath.genes <- c("Akt1", "Fadd", "Fas", "Tsc22d3", "Gpam", "Il2ra", "Rps6", "Tgfb2", "Tnfrsf4", "Tnfsf4", "Siva1", "Ripk3", "Tnfrsf23", "Dnaja3")
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(celldeath.genes), name = "CelldeathScore")
+VlnPlot(object = T_cell_sub, features = "CelldeathScore1", group.by = "cell_name",split.by = "group")
+
+
+#negative_Autophagy
+#GOBP_NEGATIVE_REGULATION_OF_AUTOPHAGY
+Autophagy.genes <- c("Rubcn", "Usp30", "Tbc1d14", "Qsox1", "Ehmt2", "Adra1a", "Akt1", "Bcl2", "Tspo", "Eif4g2", "Ptk2", "Gata4", "Hmox1", "Htr2b", "Il10", "Il10ra", "Il3", "Lep", "Lepr", "Bmf", "Mcl1", "Foxk1", "Mt3", "Mtm1", "Npc1", "Ctsa", "Ptpn22", "Sec22b", "Slc7a5", "Snca", "Stat3", "Eif4g1", "Mtmr9", "Lzts1", "Tnfaip3", "Trp53", "Tsc2", "Dap", "Nrbp2", "Klhl22", "Fez2", "Kdm4a", "Fez1", "Herc1", "Smcr8", "Tigar", "Rnf5", "Becn1", "Nupr1", "Mlst8", "Mtor", "Nampt", "Sirt2", "Tsc1", "Lrrk2", "Rnf41", "Poldip2", "Tmem39a", "Rraga", "Washc1", "Foxk2", "Pink1", "Rasip1", "Usp36", "Rptor", "Clec16a", "Chmp4b", "Dapl1", "Scfd1", "Phf23", "Cptp", "Trem2", "Wdr6", "Ubqln4", "Golga2")
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(Autophagy.genes), name = "negativeAutophagyScore")
+VlnPlot(object = T_cell_sub, features = "negativeAutophagyScore1", group.by = "cell_name",split.by = "group",pt.size = 0)
+
+#positive_Autophagy
+po_Autophagy.genes <- c("Trim68","Prkaa1","Ticam1","Nod1","Prkaa2","Pip4k2b","Adrb2","Ager","Pip4k2c","Slc25a4","Slc25a5","Bid","Bcl2l11","Bnip3","Bnip3l","Rb1cc1","Plk3","Dcn","Ddit3","Endog","Epm2a","Sesn1","Gnai3","Htt","Hif1a","Hmgb1","Hmox1","Hpse","Irgm1","Ifnb1","Ifng","Igtp","Ikbkg","Il4","Kdr","Snx18","Nprl3","Fyco1","Pafah1b2","Cdk16","Pik3c2a","Pim2","Pip4k2a","Prkd1","Ripk2","Rfpl4","Rab12","Rock1","Trim30a","Plk2","Sptlc2","Trim21","Stk11","Snx30","Supt5","Trim30d","Trim38","Tfeb","Trim58","Flcn","Tom1","Tsc2","Ulk1","Vdac1","Xbp1","Wac","Rab3gap1","Atf6","Lrsam1","Ambra1","Elapor1","Zc3h12a","Sesn2","Vps13d","Smcr8","Mid2","Tlr2","Trim30b","Tpcn1","Nod2","Map2k1","Map3k7","Mapk3","Sptlc1","Rnf31","Wdr24","Depdc5","Bag3","Ulk2","Trim12c","Smo","Rnf152","Atg2a","Trim65","Trim34b","Trim30c","Rufy4","Prkn","Atg13","Wipi1","Irgm2","Mefv","Wdr45","Sh3glb1","Nprl2","Becn1","Scoc","Tmem59","Foxo1","Tbk1","Foxo3","Gsk3b","Trp53inp1","Gsk3a","Moap1","Ralb","Tsc1","Trim13","Ormdl3","Lrrk2","Trim5","Mtdh","Ufl1","Gpsm1","Ccny","Atg101","Trp53inp2","Pink1","Snx4","Dapk1","Fbxo7","Trim32","Optn","Plekhf1","Sting1","Larp1","C9orf72","Atg7","Clec16a","Svip","Sesn3","Snx7","Trim12a","Calcoco2","Atg16l1","Hspb8","Kat5","Tlr9","Trim8","Sirt1","Cers1","Trim6","Trim34a","Sh3bp4","Rab3gap2")
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(po_Autophagy.genes), name = "positiveAutophagyScore")
+VlnPlot(object = T_cell_sub, features = "positiveAutophagyScore1", group.by = "cell_name",split.by = "group",pt.size = 0)
+
+#焦亡
+#Mouse Gene Set: GOBP_PYROPTOSIS
+Pyroptosis.genes <- c("Nlrp6","Casp1","Casp4","Casp6","Casp8","Dhx9","Gzma","Gzmb","Gzmc","Gzmd","Gzme","Gzmf","Gzmg","Naip1","Naip2","Naip5","Naip6","Nlrp1a","Nlrp3","Dpp9","Nlrp9b","Gzmn","Nlrc4","Gsdmc3","Gsdmc2","Aim2","Gsdma3","","Mefv","Gsdme","Apip","Gsdma","Zbp1","Nlrp1b","Map3k20","Pycard","Gsdmd","Gsdmc4","Gsdma2","Trem2","Gsdmc")
+T_cell_sub <- AddModuleScore(object = T_cell_sub, features = list(Pyroptosis.genes), name = "Pyroptosisscore")
+VlnPlot(object = T_cell_sub, features = "Pyroptosisscore1", group.by = "cell_name",split.by = "group",pt.size = 0)
+
+pdf("./T_cell/figure/cell_propotion_shrink_realtive_pathway.pdf",width = 20,height = 7)
+VlnPlot(T_cell_sub,c("Celldeath","Intrinsic_apoptosis","Extrinsic_apoptosis","negative_Autophagy","positive_Autophagy","Pyroptosis"),
+        group.by = "cell_name",split.by = "group",
+        stack = T,flip = T,pt.size = 0)
+dev.off()
+
+colnames(T_cell_sub@meta.data)
+
+saveRDS(T_cell_sub,"./T_cell/data/T_cell_sub_pathway_calculated.rds")
+T_cell_sub <- readRDS("./T_cell/data/T_cell_sub_pathway_calculated.rds")
+```
+
+
+
+
+```{r}
+calculate_p_values_for_pathway <- function(data, pathway) {
+  p_val_24h <- round(wilcox.test(data[data$group == "Control", pathway], data[data$group == "24h", pathway])$p.value, 3)
+  p_val_48h <- round(wilcox.test(data[data$group == "Control", pathway], data[data$group == "48h", pathway])$p.value, 3)
+  p_val_24h_48h <- round(wilcox.test(data[data$group == "24h", pathway], data[data$group == "48h", pathway])$p.value, 3)
+  
+  data.frame(
+    cell_name = unique(data$cell_name),
+    pathway = pathway,
+    p_Control_24h = p_val_24h, 
+    p_Control_48h = p_val_48h, 
+    p_24h_48h = p_val_24h_48h
+  )
+}
+
+all_pvalues <- lapply(unique(T_cell_sub@meta.data$cell_name), function(cell_type) {
+  cell_data <- T_cell_sub@meta.data[T_cell_sub@meta.data$cell_name == cell_type,]
+  do.call(rbind, lapply(pathways, calculate_p_values_for_pathway, data = cell_data))
+})
+
+pvalue_data <- do.call(rbind, all_pvalues)
+
+write.xlsx(pvalue_data,"./T_cell/figure/relative_pathway_p_val.xlsx")
+```
+
+```{r}
+#数量增加相关通路
+
+VlnPlot(T_cell_sub,c("Proliferation","Antigen_Presentation","Migration"),
+        split.by = "group",group.by = "cell_name",stack = T,flip = T)
+
+View(T_cell_sub@meta.data)
+T_cell_sub@meta.data <- T_cell_sub@meta.data %>%
+  dplyr::select(-c(Migration1,rePyroptosisscore1,))
+
+
+```
+
+
+
+```{r}
+#数量减少相关通路评分箱线图
+subset_data <- T_cell_sub@meta.data[T_cell_sub@meta.data$cell_name == "CD4+T", ]
+
+p <- ggplot(subset_data, aes(x = group, y = Celldeath,fill = group)) +
+  geom_boxplot(outlier.shape = NA) +  # 这会隐藏离群值; 如果你想显示它们，只需删除`outlier.shape = NA`
+  theme_minimal() +
+  labs(title = "Boxplot of Celldeath in CD4+T cells",
+       x = "Group",
+       y = "Celldeath Score")
+ 
+print(p)
+
+library(tidyverse)
+data_long <- T_cell_sub@meta.data %>%
+  select(cell_name, group, Proliferation,Antigen_Presentation,AICD,Intrinsic_apoptosis,Extrinsic_apoptosis,Migration,negative_Autophagy,positive_Autophagy,Pyroptosis) %>%
+  pivot_longer(cols = c(Proliferation,Antigen_Presentation,AICD,Intrinsic_apoptosis,Extrinsic_apoptosis,Migration,negative_Autophagy,positive_Autophagy,Pyroptosis),
+               names_to = "Score_Type", values_to = "Score_Value")
+
+ggplot(data_long, aes(x = group, y = Score_Value, fill = group)) + 
+  geom_boxplot(position = position_dodge(0.8), width = 0.7) + 
+  facet_grid(Score_Type ~ cell_name, scales = "free", space = "free") + 
+  theme_minimal() +
+  labs(title = "Intestine Relative pathways about population shrink",
+       x = "Group",
+       y = "Score Value")
+ggsave("./T_cell/figure/Intestine_Box_plot of relative pathways.pdf",width = 15,height = 9)
+
+colnames(T_cell_sub@meta.data)
+
+
+
+
+```
+
+
+
+##单个细胞类型
+```{r}
+T_cell_sub <- readRDS("./T_cell/data/T_cell_sub_pathway_calculated.rds")
+#NKT细胞
+nkt <- subset(T_cell_sub,subset = cell_name == "NKT")
+nkt <- SetIdent(nkt,value = "group")
+nkt.makrer <- FindMarkers(nkt,ident.1 = "48h",ident.2 = "24h")
+nkt.gene.48h <- rownames(nkt.makrer[nkt.makrer$avg_log2FC>=0.25,])
+nkt.gene.24h <- rownames(nkt.makrer[nkt.makrer$avg_log2FC<=-0.25,])
+nkt.go.48h <- enrichGO(nkt.gene.48h,
+                   OrgDb = org.Mm.eg.db,
+                   keyType = "SYMBOL",
+                   ont = "BP")
+
+nkt.go.24h <- enrichGO(nkt.gene.24h,
+                   OrgDb = org.Mm.eg.db,
+                   keyType = "SYMBOL",
+                   ont = "BP")
+
+
+# 按p.adjust排序并取前10个
+top10_48h <- df.48h %>%
+  filter(ID %in% c("GO:0006119","GO:0002181","GO:0002369","GO:0045333","GO:0009060",
+                   "GO:0002819","GO:0042129","GO:0015980","GO:0002718","GO:0006091"))
+
+top10_24h <- df.24h %>%
+  filter(ID %in% c("GO:0046631","GO:0035710","GO:0045637","GO:0002460","GO:0030217",
+                   "GO:0002520","GO:0030098","GO:0030099","GO:0043484","GO:1903311"))
+
+# 添加分组列
+top10_48h$Group <- "NKT.48h"
+top10_24h$Group <- "NTK.24h"
+
+# 合并
+df.all.top10 <- rbind(top10_48h, top10_24h)
+
+# 使用ggplot2来创建气泡图
+p <- ggplot(df.all.top10, aes(x = Group, y = Description, size = GeneRatio, color = p.adjust)) +
+  geom_point(alpha = 0.6) +
+  theme_minimal() +
+  labs(title = "Top 10 GO Enrichment Analysis", x = "Time Group", y = "GO Term", size = "Gene Ratio", color = "Adjusted p-value") +
+  theme(legend.position = "right")
+
+ggsave("./T_cell/figure/NKT_dotplot_24h_28h.pdf",plot = p,width = 11,height = 10)
+
+```
+
+ 
+ 
+##代谢分析
+```{r}
+T_cell <- readRDS("./T_cell/data/T_cell_sub_pathway_calculated.rds")
+
+table(T_cell@meta.data$cell_name)
+
+write.csv(as.matrix(T_cell@assays$RNA@counts),file = "./T_cell/scfea/T_cell_count_maxtrix.csv") # 注意，此处需要进行转置
+```
+
+
+```{r}
+sc_data <- readRDS("./T_cell/data/T_cell_sub_pathway_calculated.rds")
+```
+
+```{r}
+# 设置 group 的因子水平
+sc_data@meta.data$group <- factor(sc_data@meta.data$group, levels = c("Control", "24h", "48h"))
+
+# 创建 cell_timing 列
+sc_data@meta.data <- sc_data@meta.data %>%
+  mutate(cell_timing = paste0(cell_name, "_", group))
+
+# 定义细胞名称列表
+cell_names <- c("aDNT", "CD4+T", "CD8+T", "nDNT", "NK", "NKT", "Tcm", "Trm")
+
+# 为 cell_timing 设置因子水平
+ordered_levels <- c()
+for (name in cell_names) {
+  ordered_levels <- c(ordered_levels, paste0(name, "_Control"), paste0(name, "_24h"), paste0(name, "_48h"))
+}
+sc_data@meta.data$cell_timing <- factor(sc_data@meta.data$cell_timing, levels = ordered_levels)
+
+# 查看结果
+table(sc_data@meta.data$cell_timing)
+
+```
+
+
+```{r}
+data_c <- read.csv("./T_cell/scfea/T_result/T_cell_count_maxtrix_module168_cell5496_batch5496_LR0.008_epoch100_SCimpute_T_lambBal1_lambSca1_lambCellCor1_lambModCor_1e-2_20231015-171631.csv")
+
+sum(data_c[,1] == rownames(sc_data@meta.data))
+
+data_c0 <- as.matrix(data_c[,-1])
+rownames(data_c0) <- as.character(data_c[,1])
+data_c0 <- t(data_c0)
+ppp_all <-c()
+```
+
+```{r}
+cell_id <- sc_data@meta.data$cell_timing
+names(cell_id) <- rownames(sc_data@meta.data)
+
+yyy <- cell_id[colnames(data_c0)]
+for(ii in 1:nrow(data_c0)){
+    xxx <- data_c0[ii,]
+    final_df <- cbind(paste('X', 1:length(xxx), sep=''), xxx, yyy)
+    final_df <- as.data.frame(final_df)
+    final_df[,2] <- as.numeric(final_df[,2])
+    colnames(final_df) <- c('var', 'flux', 'cellType')
+    pp <- sd(final_df$flux)/abs(mean(final_df$flux))
+    ppp_all <- c(ppp_all, pp)
+}
+tg_ids <- which(ppp_all > 1e-10)
+```
+
+```{r}
+load('./T_cell/scfea/input/mouse_module_info.RData')
+
+a <- c(3,14,66,105,124,138,144,145)
+```
+
+```{r}
+if(length(tg_ids) > 0){
+    jj = 3 # check module 2
+    xxx <- data_c0[tg_ids[jj], ]
+    #final_df <- cbind(paste('X', 1:length(xxx), sep=''), xxx, yyy)
+    #final_df <- as.data.frame(final_df)
+    #final_df[,2] <- as.numeric(final_df[,2])
+    #colnames(final_df) <- c('var', 'flux', 'cellType')
+    final_df <- data.frame(var = paste('X', 1:length(xxx), sep=''),
+                            flux = xxx,
+                            cellType = yyy)
+        
+    title <- mouse_module_info[rownames(data_c0)[tg_ids[jj]], 'M_name']
+    aa <- ggplot(final_df, aes(x = flux, y = cellType, fill = cellType)) +
+                    geom_density_ridges() +
+                    scale_fill_manual(values = c(cols_1,cols_2,"red"))+
+                    theme_ridges() +
+                    theme(legend.position = 'none') +
+                    ggtitle(title) +
+                    theme(plot.title = element_text(hjust = 0.5))
+                    
+    plot(aa)
+    
+}
+
+tiff(paste0("./T_cell/figure/scfea_group","_",as.character(jj),"_",title,".tiff"),res = 300,units = "in",height = 12,width = 4)
+plot(aa)
+dev.off()
+```
+
+```{r}
+tiff(paste0("./T_cell/figure/scfea_group","_",as.character(jj),"_",title,".tiff"),res = 300,units = "in",height = 12,width = 4)
+plot(aa)
+dev.off()
+```
+
+```{r}
+# 提取与特定通路相关的数据
+cell_timing_name <- unique(sc_data@meta.data$cell_timing)
+cell_timing_name
+
+```
+
+```{r}
+pathway_data <- final_df[final_df$cellType %in% c("CD8+T_24h", "CD8+T_Control", "CD8+T_48h"), ]
+
+aov_result <- aov(flux ~ cellType, data = pathway_data)
+summary(aov_result)
+
+
+#Tukey HSD检验
+TukeyHSD(aov_result)
+
+ggplot(pathway_data, aes(x = cellType, y = flux, fill = cellType)) +
+  geom_violin() +
+  geom_boxplot(width = 0.1) +
+  ggtitle(title) +
+  scale_fill_manual(values = c(cols_1)) +
+  theme_minimal()
+
+```
+
+
+#Enterocyte
+##数据筛选
+```{r}
+nos2@meta.data <- nos2@meta.data %>%
+  mutate(cell_type = ifelse(seurat_clusters %in% c(1,2,7,8,9,10,13,14,16,25,28), "enterocyte", cell_type))
+Enterocyte_data <- subset(nos2, subset = cell_type == "enterocyte")
+
+```
+##整体分析
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+View(nos2@meta.data)
+sam.name <- "Enterocyte"
+dir.create(sam.name)
+dir.create(paste0("./",sam.name,"/data"))
+dir.create(paste0("./",sam.name,"/subset"))
+
+# 创建一个只包含 "T cell" 的 Seurat 对象
+Enterocyte_data <- subset(nos2, subset = cell_type == "enterocyte")
+
+Enterocyte_data <- NormalizeData(Enterocyte_data)
+Enterocyte_data <- FindVariableFeatures(Enterocyte_data, 
+                                             selection.method = "vst",
+                                             nfeatures = 1000)
+
+
+Enterocyte_data <- ScaleData(Enterocyte_data)
+
+top10 <- head(x = VariableFeatures(Enterocyte_data), 10)
+plot1 <- VariableFeaturePlot(Enterocyte_data)
+plot2 <- LabelPoints(plot = plot1, points = top10)
+pdf(file = paste0("./",sam.name,"/",sam.name,"_Norm-feature_variableplot.pdf"),width = 12,height = 8)
+CombinePlots(plots = list(plot1, plot2),legend = "none")
+dev.off()
+
+# 运行 PCA
+Enterocyte_data <- RunPCA(Enterocyte_data, 
+                          features = VariableFeatures(object = Enterocyte_data))
+#PCA结果展示-1
+pdf(paste0("./",sam.name,"/",sam.name,"PCA-VizDimLoadings.pdf"),width = 7,height = 5)
+VizDimLoadings(Enterocyte_data, dims = 1:2, reduction = "pca")
+dev.off()
+#PCA结果展示-2
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot.pdf"),width = 10,height = 8)
+DimPlot(Enterocyte_data, reduction = "pca")
+dev.off()
+#PCA结果展示-3
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot_group.pdf"),width = 10,height = 8)
+DimPlot(Enterocyte_data, reduction = "pca",split.by = "group")
+dev.off()
+#PCA热图
+pcadim <- 15
+
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimHeatmap_","pcadim=",pcadim,".pdf"),width = 10,height = 8)
+DimHeatmap(Enterocyte_data, dims = 1:pcadim, cells = 500, balanced = TRUE)
+dev.off()
+#耗时长的
+Enterocyte_data <- JackStraw(Enterocyte_data,num.replicate = 100,dims = 40)
+pdf(paste0("./",sam.name,"/PCA-JackStrawPlot_40_",sam.name,".pdf"),width = 6,height = 5)
+JackStrawPlot(object = Enterocyte_data, dims = 1:40)
+dev.off()
+
+#耗时短的
+Enterocyte_data <- ScoreJackStraw(Enterocyte_data, dims = 1:40)
+pdf(paste0("./",sam.name,"/PCA-ElbowPlot_",sam.name,".pdf"),width = 6,height = 5)
+ElbowPlot(Enterocyte_data,ndims = 40)
+dev.off()
+
+
+
+dim.use = 1:7
+# 运行 t-SNE 或 UMAP 降维
+Enterocyte_data <- RunTSNE(Enterocyte_data, dims = dim.use)
+# 或者
+Enterocyte_data <- RunUMAP(Enterocyte_data, dims = dim.use)
+
+
+res = 0.4
+# 寻找聚类
+Enterocyte_data <- FindNeighbors(Enterocyte_data, dims = dim.use)
+Enterocyte_data <- FindClusters(Enterocyte_data, resolution = res)
+
+
+# 可视化结果
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"PC.pdf"),width = 5,height = 4)
+DimPlot(object = Enterocyte_data, pt.size=0.6,label = T)
+dev.off()
+
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"_split","PC.pdf"),width = 8,height = 5)
+DimPlot(object = Enterocyte_data, pt.size=0.6,label = T,split.by = "group")
+dev.off()
+
+
+
+#找差异基因
+Enterocyte.cell<- FindAllMarkers(Enterocyte_data, only.pos = TRUE, 
+                              min.pct = 0.3, logfc.threshold = 0.25)
+write.table(Enterocyte.cell,
+            file=paste0("./",sam.name,"/",sam.name,"_total_marker_genes_tsne_",as.character(res),"_",max(dim.use),"PC.txt"),
+            sep="\t",quote = F,row.names = F)
+
+
+# 计算每个实验组在每个 cluster 中的细胞数量
+cell_counts <- table(Enterocyte_data@meta.data$group, Enterocyte_data@meta.data$seurat_clusters)
+
+# 将数据转换为 data frame 并为列命名
+cell_counts_df <- as.data.frame.table(cell_counts)
+names(cell_counts_df) <- c("group", "cluster", "cell_count")
+
+# 计算每个 cluster 在每个 group 中的百分比
+cell_counts_df$percentage <- ave(cell_counts_df$cell_count, cell_counts_df$group, FUN = function(x) x / sum(x) * 100)
+
+# 对比两组中每个 cluster 的百分比
+pdf(paste0("./",sam.name,"/","resoluton=",res,"_",sam.name,"_cluster_percentage.pdf"))
+ggplot(cell_counts_df, aes(x = cluster, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  xlab("Cluster") +
+  ylab("Percentage of cells (%)") +
+  ggtitle(paste0("Percentage of cells in each cluster for ",sam.name)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+
+saveRDS(Enterocyte_data,paste0("./",sam.name,"/data/",sam.name,"_data.rds"))
+saveRDS(cell_counts_df,paste0("./",sam.name,"/data/",sam.name,"_count_df.rds"))
+write.xlsx(cell_counts_df,paste0("./",sam.name,"/",sam.name,"_count_df.xlsx"))
+```
+##亚群分析enterocyte 0-11
+```{r}
+for(clu_num in 8:11){
+  
+  cluster <- paste0("cluster",as.character(clu_num))
+  dir.create(paste0("./",sam.name,"/subset/",cluster))
+  
+#需要修改
+  df <- Enterocyte_data@meta.data[c("group", "seurat_clusters")]
+  df$is_cluster <- df$seurat_clusters == clu_num
+  contingency_table <- table(df$group, df$is_cluster)
+  chisq_test <- chisq.test(contingency_table)
+  
+  observed <- chisq_test$observed
+  expected <- chisq_test$expected
+  residuals <- (observed - expected) / sqrt(expected)
+  
+  significant_residuals <- which(abs(residuals) > 2, arr.ind = TRUE)
+  
+    # 创建并写入卡方检验和残差分析的结果
+  result_filename <- paste0("./",sam.name,"/subset/",cluster,"/cluster_test_result.xlsx")
+  df_to_write <- data.frame(
+    "Chi-square test result" = toString(chisq_test),
+    "Standardized residuals" = toString(residuals),
+    "Significant residuals (row and column indices)" = toString(significant_residuals)
+  )
+  write.xlsx(df_to_write, result_filename)
+
+  
+  # 以下是你原有的代码，我假设它们在这个循环中应该保持不变
+  # 取出你感兴趣的群体
+#需要修改
+  cluster_data <- subset(Enterocyte_data, subset = seurat_clusters == clu_num & group %in% c("Control","24h", "48h"))
+  cluster_data <- subset(cluster_data, subset = nFeature_RNA > 200)
+  cluster_data <- cluster_data[ , cluster_data$nCount_RNA > 0]
+
+  # 将数据转换为DESeqDataSet
+  dds <- DESeqDataSetFromMatrix(countData = cluster_data@assays$RNA@counts + 1,
+                              colData = cluster_data@meta.data,
+                              design = ~ group)
+  dds$group <- relevel(dds$group, ref = "Control")
+
+  # 进行差异表达分析
+  dds <- DESeq(dds)
+
+  # 获取差异表达的结果
+  res <- results(dds)
+  res_df <- as.data.frame(res)
+  write.xlsx(res_df,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG.xlsx"),rowNames = T)
+  saveRDS(res,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_deg_data.rds"))
+
+
+
+
+  #   选择显著差异表达的基因
+  sig_genes <- rownames(res)[res$pvalue < 0.05 & (abs(res$log2FoldChange) > 1)]
+  sig_genes <- sig_genes[!is.na(sig_genes)]
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_total_",as.character(length(sig_genes)),".txt"))
+  
+  res.Control.vs.24h <- results(dds, contrast = c("group", "24h", "Control"))
+  res.Control.vs.48h <- results(dds, contrast = c("group", "48h", "Control"))
+  res.24h.vs.48h <- results(dds, contrast = c("group", "48h", "24h"))
+  
+  sig_genes.Control.vs.24h <- rownames(res.Control.vs.24h)[which(res.Control.vs.24h$pvalue < 0.05 & abs(res.Control.vs.24h$log2FoldChange) > 1)]
+  sig_genes.Control.vs.48h <- rownames(res.Control.vs.48h)[which(res.Control.vs.48h$pvalue < 0.05 & abs(res.Control.vs.48h$log2FoldChange) > 1)]
+  sig_genes.24h.vs.48h <- rownames(res.24h.vs.48h)[which(res.24h.vs.48h$pvalue < 0.05 & abs(res.24h.vs.48h$log2FoldChange) > 1)]
+  
+  sig_genes.Control.vs.24h.48h <- union(sig_genes.Control.vs.24h, sig_genes.Control.vs.48h)
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_con_",as.character(length(sig_genes.Control.vs.24h.48h)),".txt"))
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_24h_",as.character(length(sig_genes.24h.vs.48h)),".txt"))
+
+  
+  mart <- readRDS("./mart.rds")
+  #开始算control vs 24 48
+  gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.Control.vs.24h.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_control <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control <- data.frame(ego_ALL_control)
+  ego_all_control <- ego_all_control[order(ego_all_control$p.adjust),]
+  ego_all_control <- ego_all_control %>%
+    arrange(desc(Count))
+  ego_all_control_top30 <- ego_all_control[1 : 30,]
+  p_con <- ggplot(data=ego_all_control_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  #开始计算
+  gene_result_24_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.24h.vs.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_24h <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h <- data.frame(ego_ALL_24h)
+  write.csv(ego_all_24h,paste0("./",sam.name,"/subset/",cluster,"/enrichGO_all_24h.csv"))
+  
+  ego_all_24h <- ego_all_24h[order(ego_all_24h$p.adjust),]
+  ego_all_24h <- ego_all_24h %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h[1 : 30,]
+
+  p_24h <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con,p_24h)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_allont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+
+  # BP富集
+  ego_ALL_control_BP <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control_bp <- data.frame(ego_ALL_control_BP)
+  ego_all_control_bp <- ego_all_control_bp[order(ego_all_control_bp$p.adjust),]
+  ego_all_control_bp <- ego_all_control_bp %>%
+    arrange(desc(Count))
+  ego_all_control_bp_top30 <- ego_all_control_bp[1 : 30,]
+  p_con_bp <- ggplot(data=ego_all_control_bp_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  
+  ego_ALL_24h_BP <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h_bp <- data.frame(ego_ALL_24h_BP)
+  ego_all_24h_bp <- ego_all_24h_bp[order(ego_all_24h$p.adjust),]
+  ego_all_24h_bp <- ego_all_24h_bp %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h_bp[1 : 30,]
+
+  p_24h_bp <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con_bp,p_24h_bp)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_bp_ont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+  #kegg
+  clu_kegg_con <- enrichKEGG(gene = na.omit(gene_result_con_vs$entrezgene_id), 
+                         organism = 'mmu')
+  clu_kegg_24h <- enrichKEGG(gene = na.omit(gene_result_24_vs$entrezgene_id), 
+                         organism = 'mmu')
+  
+  p_con1 <- barplot(clu_kegg_con, showCategory=12)
+  p_con2 <- dotplot(clu_kegg_con, showCategory=12)
+  plotc_1 = p_con1/p_con2
+  
+  p_con3 <- barplot(clu_kegg_24h, showCategory=12)
+  p_con4 <- dotplot(clu_kegg_24h, showCategory=12)
+  plotc_2 = p_con3/p_con4 
+  
+  try(p_combined_kegg <- plot_grid(plotc_1,plotc_2),silent = T)
+  
+  try(ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"enrich_KEGG.pdf"), plot = p_combined_kegg, width = 36, height = 30),silent = T)
+
+  
+  
+  #############################
+  
+  # 第一张图: 三个组别用sig_genes.Control.vs.24h.48h基因来做热图
+
+  exprs_data_1 <- cluster_data[["RNA"]]@data[sig_genes.Control.vs.24h.48h, ]
+
+  # 标准化数据
+  exprs_data_1 <- t(scale(t(exprs_data_1)))
+
+  # 添加分组信息
+  ha_1 = HeatmapAnnotation(df = data.frame(group = cluster_data@meta.data$group),
+                       col = list(group = c("Control" = "#00b0eb", "24h" = "#ffd401", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_1 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data@meta.data$group)))))
+
+  # 绘制热图
+  col_fun = circlize::colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+  heatmap_1 = Heatmap(exprs_data_1, 
+                  name = "expression", 
+                  top_annotation = ha_1, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_1)
+
+
+
+# 第二张图: 24h组和48h组用sig_genes.24h.vs.48h基因来做热图
+
+  cluster_data_2 <- subset(cluster_data, subset = group %in% c("24h", "48h"))
+
+  exprs_data_2 <- cluster_data_2[["RNA"]]@data[sig_genes.24h.vs.48h, ]
+
+  # 标准化数据
+  exprs_data_2 <- t(scale(t(exprs_data_2)))
+
+  # 添加分组信息
+  ha_2 = HeatmapAnnotation(df = data.frame(group = cluster_data_2@meta.data$group),
+                       col = list(group = c("24h" = "#3f60aa", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_2 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data_2@meta.data$group)))))
+
+  # 绘制热图
+  heatmap_2 = Heatmap(exprs_data_2, 
+                  name = "expression", 
+                  top_annotation = ha_2, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_2)
+
+
+
+  
+  pdf(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_heatmap.pdf"), width = 20, height = 15)
+  layout(matrix(1:2,2,1))
+  draw(heatmap_1, heatmap_legend_side = "bot")
+  draw(heatmap_2, heatmap_legend_side = "bot")
+  dev.off()
+}
+
+
+
+
+
+
+```
+
+
+
+##整体定义
+```{r}
+Enterocyte_data <- readRDS("./Enterocyte/data/Enterocyte_data.rds")
+
+
+View(Enterocyte_data@meta.data)
+DimPlot(Enterocyte_data)
+
+VlnPlot(Enterocyte_data,c("Lgr5","Mki67","Reg4","Dclk1","Alpi","Chga","Spdef","Neurod1","Atoh1","Muc2","Tff3","Otop2"),
+        stack = T,flip = T)
+
+#Goblet
+VlnPlot(Enterocyte_data,c("Muc2","Tff3","Gob5","Clca3","Spdef"),stack = T,flip = T)
+
+#Paneth
+VlnPlot(Enterocyte_data,c("Gsta1","Aldob","Prap1"),stack = T,flip = T)
+FeaturePlot(Enterocyte_data,c("Gsta1","Aldob","Prap1"))
+
+#Colonocytes
+VlnPlot(Enterocyte_data,c("Alpi","Slc6a14","Wfdc2","Sult1b1","Maoa","Fgfbp1","Mep1a","Muc2"),
+        stack = T,flip = T)
+
+#TA
+VlnPlot(Enterocyte_data,c("Mki67","Pcna","Top2a","Cenpf","Pclaf","Cenpa","Cdk1",
+                          "Muc2","Spdef","Tff3"),
+        stack = T,flip = T)
+#Tuft
+VlnPlot(Enterocyte_data,c("Dclk1"))
+
+
+
+
+FeaturePlot(Enterocyte_data,c("Mki67","Muc2"),label = T)
+
+DimPlot(Enterocyte_data,label = T)
+```
+
+
+##Colonocyte
+```{r}
+Colonocyte <- subset(Enterocyte_data,subset = seurat_clusters %in% c(1,3,5,6,7,8,9,10,13,14))
+table(Colonocyte@meta.data$seurat_clusters)
+Colonocyte@meta.data$seurat_clusters <- as.character(Colonocyte@meta.data$seurat_clusters)
+
+Colonocyte <- my_sc_flow(Colonocyte,"Colonocyte")
+Colonocyte <- readRDS("./Colonocyte/data/Colonocyte_data.rds")
+DimPlot(Colonocyte,label = T)
+
+#干细胞
+VlnPlot(Colonocyte,c("Lgr5","Ascl2","Slc12a2","Axin2","Olfm4","Gkn3"),
+        stack = T,flip = T)
+#无小肠enterocyte
+VlnPlot(Colonocyte,c("Alpi","Apoa1","Apoa4","Fabp1"),
+        stack = T,flip = T)
+
+#13 是Goblet细胞 14是Goblet/B细胞
+VlnPlot(Colonocyte,c("Muc2","Spdef","Tff3","Agr2","Mki67"),
+        stack = T,flip = T)
+Colonocyte@meta.data <- Colonocyte@meta.data %>%
+  mutate(cell_name = ifelse(seurat_clusters %in% c(13,14),"Goblet","to_be_defined"))
+View(Colonocyte@meta.data)
+
+#12是Goblet progenitor细胞
+VlnPlot(Colonocyte,c("Cd79a","Cd79b","Cr2"),
+        stack = T,flip = T)
+Colonocyte@meta.data <- Colonocyte@meta.data %>%
+  mutate(cell_name = ifelse(seurat_clusters == 12,"B cell",cell_name))
+table(Colonocyte@meta.data$seurat_clusters)
+
+#无Paneth细胞
+VlnPlot(Colonocyte,c("Lyz1","Defa17","Defa22","Defa24","Ang4"),
+        stack = T,flip = T)
+#无内分泌细胞
+VlnPlot(Colonocyte,c("Chga","Chgb","Tac1","Tph1"),
+        stack = T,flip = T)
+#无Tuft细胞
+VlnPlot(Colonocyte,c("Dclk1","Trpm5","Gfi1b","Il25"),
+        stack = T,flip = T)
+
+
+Colonocyte_sub <- subset(Colonocyte,subset = seurat_clusters %in% c(0:11))
+
+DimPlot(Colonocyte_sub,label = T)
+
+VlnPlot(Colonocyte,c("Tmigd1","Paics","Hopx","Sema5a","Myb","Lsr","Ifit1","Sptssb",
+                    "Gsdmc2","Gsdmc3","Gsdmc4","Lgr5","Ezr","Mgll","Cldn8"),
+        stack = T,flip = T)
+
+RidgePlot(Colonocyte,c("Cd79a"))
+```
+
+
+
+
+```{r}
+VlnPlot(Colonocyte,c("Car1","Ascl2","Slc16a1","Mct1"),
+        stack = T,flip = T)
+
+
+
+Colon_sub <- subset(Enterocyte_data,subset = seurat_clusters %in% c(1,3,5,6,7,8,9,10))
+
+Colon_sub@meta.data$seurat_clusters <- as.character(Colon_sub@meta.data$seurat_clusters)
+table(Colon_sub@meta.data$seurat_clusters)
+
+Colon_sub <- my_sc_flow(Colon_sub,"Colon_sub")
+Colon_sub <- readRDS("./Colon_sub/data/Colon_sub_data.rds")
+
+#cluster 1 3 有一些干细胞的标记
+VlnPlot(Colon_sub,c("Lgr5","Agr2","Hmgcs2","Ascl2","Fabp2"),
+        stack = T,flip = T)
+RidgePlot(Colon_sub,c("Lgr5"),ncol = 1)
+FeaturePlot(Colon_sub,c("Lgr5"))
+DimPlot(Colon_sub,label = T,split.by = "group")
+FeaturePlot(Colon_sub,c("Krt20"),label = T)
+
+#DCS deep crypt secretory
+VlnPlot(Colon_sub,c("Reg4","Tff3","Sval1","Spink1"),
+        stack = T,flip = T)
+
+#coloncytes 0 2 8
+VlnPlot(Colon_sub,c("Wfdc2","Fgfbp1","Maoa","Sult1b1",
+                    "Krt20","Ezr","Selenbp1","Cyp2c55","Car1"),
+        stack = T,flip = T)
+VlnPlot(Colon_sub,c("Selenbp1","Cyp2c55","Car1"),
+        stack = T,flip = T)
+#coloncytes 0 2 8 4 5
+#cluster 0 Krt20低表达
+
+clu4 <- FindMarkers(Colon_sub,ident.1 = 4)
+
+
+VlnPlot(Colon_sub,c("Wfdc2", "Ripk1", "Tcf4", "Gdnf",  "Cdx2", "Mlh1",  "Rfc1", "Krt8", "Cd274", "Cldn2", "Smad4", "Bax", "Rhoa",  "Rhob", "Cish", "Nox1", "Snx10", "Gsdmb", "Sult2b1", "Prdx6", "Myd88", "Slc3a2", "Rnf186", "Smad4"),
+        stack = T,flip = T)
+
+data <- subset(Colon_sub,subset = seurat_clusters %in% c(0,2,4,5,6,7,8))
+
+
+
+VlnPlot(Colon_sub,c("Gm26917","Slfn4","Irf7","Abcb1a","Tmigd1","Lgr5","Krt20","Ezr"),
+        stack = T,flip = T,split.by = "group")
+
+VlnPlot(Colon_sub,c("Gm26917","Slfn4","Irf7","Abcb1a","Tmigd1","Wfdc2","Krt20","Ezr"),
+        stack = T,flip = T)
+
+RidgePlot(Colon_sub,c("Ezr"),ncol = 1)
+
+
+
+
+```
+
+
+
+```{r}
+#3分类法
+#Tmigd1+ 4 5 6 7 表达Tmigd1的
+#Tmigd1- 0 2 8 
+#steam 13
+
+data <- Colon_sub
+
+
+
+data@meta.data <- data@meta.data %>%
+  mutate(class = case_when(
+  seurat_clusters %in% c(1,3) ~ "stem",
+  seurat_clusters %in% c(4,5,6,7) ~ "Tmigd1+",
+  seurat_clusters %in% c(0,2,8) ~ "Tmigd1-"
+  ))
+
+data <- SetIdent(data,value = "class")
+
+res_immune <- FindAllMarkers(data)
+
+res_immune <- res_immune %>%
+  mutate(def = pct.1 / pct.2)
+
+
+write.xlsx(res_immune,"./Colon_sub/3_cell_sub.xlsx")
+
+
+
+
+
+VlnPlot(data,c("Tmigd1","Paics","Hopx","Sema5a","Myb","Lsr","Ifit1","Sptssb",
+                    "Gsdmc2","Gsdmc3","Gsdmc4","Lgr5","Ezr","Mgll","Cldn8"),
+        stack = T,flip = T,group.by = "class")
+
+
+table(data$class)
+
+dotplot(enrichGO(
+    gene = rownames(res_immune[(res_immune$p_val_adj<=0.05 & res_immune$cluster == "Tmigd1-") & res_immune$avg_log2FC >0.5,]),
+    OrgDb = org.Mm.eg.db,
+    ont = "BP",
+    keyType = "SYMBOL"
+  )
+)
+
+top10_genes_per_cell_name <- res_immune %>% group_by(cluster) %>% top_n(20, avg_log2FC)
+genes_to_plot <- top10_genes_per_cell_name$gene
+DoHeatmap(data, features = genes_to_plot)
+
+table(Colon_sub@meta.data$cell_name)
+
+Colon_sub@meta.data <- Colon_sub@meta.data %>%
+  mutate(cell_name = case_when(
+  seurat_clusters %in% c(1,3) ~ "stem",
+  seurat_clusters %in% c(4,5,6,7) ~ "Tmigd1+",
+  seurat_clusters %in% c(0,2,8) ~ "Tmigd1-"
+  )) 
+
+saveRDS(Colon_sub,"./Colon_sub/data/Colon_sub_data.rds")
+```
+
+
+```{r}
+#4分类法
+
+md <- Colon_sub
+
+md@meta.data <- md@meta.data %>%
+  mutate(class = case_when(
+  seurat_clusters %in% c(1,3) ~ "stem",
+  seurat_clusters %in% c(4,7) ~ "Tmigd1+ immune",
+  seurat_clusters %in% c(5,6) ~ "Tmigd1+ not_immune",
+  seurat_clusters %in% c(0,2,8) ~ "Tmigd1- colonocyte"
+  ))
+VlnPlot(md,c("Tmigd1","Paics","Hopx","Sema5a","Myb","Lsr","Ifit1","Sptssb",
+                    "Gsdmc2","Gsdmc3","Gsdmc4","Lgr5","Ezr","Mgll","Cldn8"),
+        stack = T,flip = T,group.by = "class")
+
+md <- SetIdent(md,value = "class")
+
+md.res <- FindAllMarkers(md)
+
+top10_genes_per_cell_name <- md.res %>% group_by(cluster) %>% top_n(20, avg_log2FC)
+genes_to_plot <- top10_genes_per_cell_name$gene
+DoHeatmap(md, features = genes_to_plot)
+
+```
+
+###将Colonocyte合并数据
+```{r}
+Enterocyte_data <- subset(Enterocyte_data,subset = seurat_clusters %in% c(0:12,15))
+table(Enterocyte_data@meta.data$seurat_clusters)
+Enterocyte_data@meta.data$seurat_clusters <- as.character(Enterocyte_data@meta.data$seurat_clusters)
+
+Enterocyte_data@meta.data <- Enterocyte_data@meta.data %>%
+  mutate(cell_name = case_when(
+    seurat_clusters %in% c(0,4,11) ~ "Goblet",
+    seurat_clusters == 2 ~ "TA",
+    seurat_clusters == 12 ~ "Goblet progenitor",
+    seurat_clusters == 15 ~ "Tuft",
+    seurat_clusters %in% c(1,3,5,6,7,8,9,10) ~ "Coloncyte"
+  ))
+
+table(Colon_sub@meta.data$cell_name)
+
+colon_sub_labels <- Colon_sub$cell_name
+index_in_Enterocyte_data <- match(rownames(Colon_sub@meta.data), rownames(Enterocyte_data@meta.data))
+matched_indices <- !is.na(index_in_Enterocyte_data)
+Enterocyte_data@meta.data$cell_name[index_in_Enterocyte_data[matched_indices]] <- colon_sub_labels[matched_indices]
+
+table(Enterocyte_data@meta.data$cell_name)
+Enterocyte_data <- subset(Enterocyte_data,subset = cell_name != "Coloncyte")
+
+
+DimPlot(Enterocyte_data,label = T,group.by = "cell_name")
+
+saveRDS(Enterocyte_data,"./Enterocyte/data/Enterocyte_Conloncyte_defined.rds")
+```
+
+##Tuft
+```{r}
+Enterocyte_data <- readRDS("./all_enterocyte/data/enterocyte_all.rds")
+
+tuft <- subset(enterocyte_data,subset = cell_name == "Tuft")
+
+tuft <- SetIdent(tuft,value = "group")
+
+tuft.marker <- FindMarkers(tuft,ident.1 = "24h",ident.2= "Control")
+
+res <- expr_and_go_kegg(tuft.marker,log2(1.2))
+```
+
+##杯状细胞
+```{r}
+goblet <- subset(Enterocyte_data,subset = cell_name == "Goblet")
+
+sam.name <- "./Enterocyte/Goblet"
+
+goblet <- my_sc_flow(goblet,sam.name,"Goblet")
+
+#
+VlnPlot(goblet,c("Muc2","Tff3","Gob5","Clca3","Spdef"),stack = T,flip = T)
+
+#cluster5 10 肠上皮
+VlnPlot(goblet,c("Alpi","Slc6a14","Wfdc2","Sult1b1","Maoa","Fgfbp1","Mep1a","Muc2"),
+        stack = T,flip = T)
+
+DimPlot(goblet,split.by = "group",label = T)
+
+
+FeaturePlot(Enterocyte_data,features = c("Muc2","Tff3","Spdef","Hsd11b2","Reg4"),label = T)
+DimPlot(Enterocyte_data,label = T,group.by = "seurat_clusters")
+
+goblet_def <- FindMarkers(Enterocyte_data,ident.1 = c(4,11),ident.2 = 0)
+
+goblet_def <- goblet_def %>%
+  mutate(def = pct.1 / pct.2,
+         gene = rownames(goblet_def)) 
+
+
+write.xlsx(goblet_def,"./Enterocyte/Goblet/gene_vs_4and11_0.xlsx")
+
+FeaturePlot(Enterocyte_data,features = c("Hsd11b2","Reg4","Mki67"),label = T) 
+
+FeaturePlot(goblet_sub,features = c("Hsd11b2","Reg4"),label = T)
+
+#摘出3个cluster
+data <- subset(Enterocyte_data,subset = seurat_clusters %in% c(0,4,11))
+
+tes <- FindAllMarkers(data)
+
+tes <- tes %>%
+  mutate(def = pct.1 / pct.2,
+         gene = rownames(tes)) 
+
+all_markers <- FindAllMarkers(Mesenchymal_sub, only.pos = TRUE, min.pct = 0.25, logfc.threshold = 0.25, group.by='cell_name')
+top5_genes_per_cell_name <- goblet_def %>% top_n(-20, avg_log2FC)
+genes_to_plot <- top5_genes_per_cell_name$gene
+DoHeatmap(data, features = genes_to_plot)
+```
+
+
+
+
+
+```{r}
+goblet_sub <- subset(goblet,subset = seurat_clusters %in% c(0,1,2,3,4,6,7,8,9))
+
+sam.name = "./Enterocyte/Goblet_sub"
+goblet_sub <- my_sc_flow(goblet_sub,sam.name,"Goblet_sub")
+goblet_sub <- readRDS("./Enterocyte/Goblet_sub/data/Goblet_sub_data.rds")
+
+
+VlnPlot(goblet_sub,c("Mxd1","Slfn4","Aqp8",
+                     "Clca1","Fcgbp","Atoh1",#经典的canonical GCs 0 3 5 7
+                     "Sytl2", # 1,6 Sytl2- Gcs
+                     "Gsdmc4","Dmbt1","Hes1"), #2 4  noncanonical GCs
+        stack = T,flip = T)
+
+nos2 <- readRDS("./ns2_data.rds")
+
+FeaturePlot(goblet_sub,c("Reg4"),label = T)
+
+VlnPlot(goblet_sub,c("Muc2","Sytl2","Vamp8","Reg4"),stack = T,flip = T)
+
+
+goblet_sub@meta.data <- goblet_sub@meta.data %>%
+  mutate(cell_name = case_when(
+    seurat_clusters %in% c(0,3,5,7) ~ "cGCs",
+    seurat_clusters %in% c(2,4) ~ "ncGCs",
+    seurat_clusters %in% c(1,6) ~ "Sytl2- GCs"
+  ))
+
+goblet_sub <- SetIdent(goblet_sub,value = "cell_name")
+
+goblet_res <- FindAllMarkers(goblet_sub)
+
+top5_genes_per_cell_name <- goblet_res %>% group_by(cluster) %>% top_n(20, avg_log2FC)
+genes_to_plot <- top5_genes_per_cell_name$gene
+DoHeatmap(goblet_sub, features = genes_to_plot)
+
+View(goblet_res)
+
+sytl2 <- goblet_res %>%
+  filter(cluster == "Sytl2- GCs")
+
+res <- expr_and_go_kegg(sytl2,0.5,-0.5)
+
+VlnPlot(goblet_sub,c("Sytl2"))
+```
+
+###将杯状细胞分类回归enterocyte
+```{r}
+table(Enterocyte_data@meta.data$cell_name)
+
+
+goblet_sub_labels <- goblet_sub$cell_name
+index_in_Enterocyte_data <- match(rownames(goblet_sub@meta.data), rownames(Enterocyte_data@meta.data))
+matched_indices <- !is.na(index_in_Enterocyte_data)
+Enterocyte_data@meta.data$cell_name[index_in_Enterocyte_data[matched_indices]] <- goblet_sub_labels[matched_indices]
+
+table(Enterocyte_data@meta.data$cell_name)
+Enterocyte_data <- subset(Enterocyte_data,subset = cell_name != "Goblet")
+
+DimPlot(Enterocyte_data,label = T,group.by = "cell_name")
+
+saveRDS(Enterocyte_data,"./Enterocyte/data/Enterocyte_all_difined.rds")
+
+Enterocyte_data <- readRDS("./Enterocyte/data/Enterocyte_all_difined.rds")
+DimPlot(Enterocyte_data,label = T,group.by = "cell_name")
+TSNEPlot(Enterocyte_data,label = T,group.by = "cell_name")
+
+Enterocyte_data <- SetIdent(Enterocyte_data,value = "cell_name")
+all_markers <- FindAllMarkers(Enterocyte_data)
+top5_genes_per_cell_name <- all_markers %>% group_by(cluster) %>% top_n(10, avg_log2FC)
+genes_to_plot <- top5_genes_per_cell_name$gene
+DoHeatmap(Enterocyte_data, features = genes_to_plot)
+
+DimPlot(Enterocyte_data,label = T,group.by = "cell_type")
+DimPlot(Enterocyte_data,label = T,group.by = "cell_name")
+
+Enterocyte_data@meta.data <- Enterocyte_data@meta.data %>%
+  mutate(cell_type = case_when(
+    cell_name %in% c("cGCs","ncGCs","Sytl2- GCs") ~ "Goblet",
+    cell_name %in% c("Tmigd1-","Tmigd1+","stem") ~ "Colonocyte",
+    T ~ cell_name
+  ))
+
+View(Enterocyte_data@meta.data)
+```
+
+###杯状细胞WGCNA
+```{r}
+
+my_data <- goblet_sub
+
+
+
+View(goblet_sub@meta.data)
+
+seurat_obj <- SetupForWGCNA(
+    my_data,
+    gene_select = "fraction",
+    fraction = 0.05,
+    wgcna_name = "Goblet" # hdWGCNA实验名称
+)
+
+table(goblet_sub@meta.data$seurat_clusters)
+class(goblet_sub@meta.data$seurat_clusters)
+
+# 构造metacell
+seurat_obj <- MetacellsByGroups(
+    seurat_obj = seurat_obj,
+    group.by = c("seurat_clusters","group"),  # 将来自同一Sample的同种cell_type构造成metacell
+    reduction = "umap", # 用于执行KNN算法，此处harmony为通过harmony校正过的PCA
+    k = 25, # KNN参数
+    max_shared = 10, # 两个metacell可共享的最大细胞数
+    ident.group = "seurat_clusters",  # Idents名
+    min_cells = 25
+)
+
+# 标准化metacell表达矩阵
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+seurat_obj <- SetDatExpr(
+    seurat_obj,
+    group_name = c(0:7), # 挑选感兴趣的细胞类型，可以c("INH", "EX")挑选多个感兴趣的细胞类型
+    group.by = "seurat_clusters", # INH所在的metadata列名
+    assay = "RNA",
+    slot = "data"
+)
+
+seurat_obj <- TestSoftPowers(
+    seurat_obj,
+    networkType = "signed" # 此外，还可选择“unsigned”或“signed hybrid”参数
+)
+
+plot_list <- PlotSoftPowers(seurat_obj)
+
+
+
+wrap_plots(plot_list, ncol=2)
+```
+
+
+```{r}
+seurat_obj <- ConstructNetwork(
+    seurat_obj, soft_power = 12, # 上图中黑色圆圈中的最佳软阈值
+    setDatExpr = FALSE,
+    tom_outdir  = 'Goblet' # TOM矩阵名称，运行后会在当前目录生成一个TOM文件夹保存TOM矩阵
+)
+
+PlotDendrogram(seurat_obj, main='Goblet_dendrogram')
+```
+
+
+
+```{r}
+TOM <- GetTOM(seurat_obj)
+
+TOM[1:4, 1:4]
+
+seurat_obj <- ScaleData(seurat_obj, features = VariableFeatures(seurat_obj))
+
+seurat_obj <- ModuleEigengenes(
+    seurat_obj,
+    group.by.vars = "group"  # 根据Sample去批次
+)
+
+seurat_obj <- ModuleConnectivity(
+    seurat_obj
+      # 这里继续计算INH（感兴趣的细胞类型）的kME
+)
+
+seurat_obj <- ResetModuleNames(
+    seurat_obj,
+    new_name = "Goblet_module"
+)
+
+PlotKMEs(seurat_obj, ncol = 5, n_hubs = 10)
+
+```
+
+
+```{r}
+
+# get the module assignment table:
+modules <- GetModules(seurat_obj)
+
+# 通过GetHubGenes函数抽取每个模块的topN hub节点，即每个模块中kME高的topN个基因
+hub_df <- GetHubGenes(seurat_obj = seurat_obj, n_hubs = 10)
+
+# 至此，基本完成了hdWGCNA分析
+saveRDS(seurat_obj, file = 'Goblet_hdWGCNA_object.rds')
+
+
+# 根据每个模块的topN个基因对细胞进行打分
+seurat_obj <- ModuleExprScore(
+    seurat_obj,
+    n_genes = 25, # topN hub genes
+    method = "Seurat" # 打分方法，分为Seurat、UCell
+)
+
+# 根据hMEs进行FeaturePlot
+plot_list <- ModuleFeaturePlot(
+    seurat_obj,
+    features = 'hMEs', # 可选择MEs、hMEs、scores、average
+    order = TRUE # order so the points with highest hMEs are on top
+)
+
+
+#  stitch together with patchwork
+wrap_plots(plot_list, ncol = 6)
+
+DimPlot(goblet_sub)
+```
+
+```{r}
+# 模块相关性
+ModuleCorrelogram(seurat_obj)
+
+```
+
+```{r}
+
+# 利用Seurat自带的可视化方法
+
+# get hMEs from seurat object
+MEs <- GetMEs(seurat_obj, harmonized=TRUE)
+mods <- colnames(MEs); mods <- mods[mods != 'grey']
+
+# add hMEs to Seurat meta-data:
+seurat_obj@meta.data <- cbind(seurat_obj@meta.data, MEs)
+
+p1 <- DotPlot(seurat_obj, features = mods, group.by = "seurat_clusters")
+p1 <- p1 + 
+#     coord_flip() + # 反转x/y轴
+    RotatedAxis() + # 旋转坐标轴标签
+    scale_color_gradient2(high = "red", mid = "grey95", low = "blue")  # 改颜色
+p1
+
+
+```
+
+
+```{r}
+p <- VlnPlot(
+    seurat_obj,
+    features = "Goblet_module10",
+    group.by = "seurat_clusters",
+    pt.size = 0
+)
+p <- p + geom_boxplot(width = .25, fill = "white")
+p <- p + xlab("") + ylab("hME") + NoLegend()
+p
+```
+
+
+```{r}
+
+
+library(igraph)
+
+ModuleNetworkPlot(seurat_obj = seurat_obj, mods = "all")
+```
+
+
+```{r}
+HubGeneNetworkPlot(
+    seurat_obj,
+    n_hubs = 3, # 用于可视化的hub gene
+    n_other = 5, # 随机选取的gene
+    edge_prop = 0.75, # 采样的边数
+    mods = "all"
+)
+```
+
+
+```{r}
+# 将基因降维成UMAP图，该函数会在Seurat_obj@misc$wgcna_name中生成一个module_umap矩阵
+seurat_obj <- RunModuleUMAP(
+    seurat_obj, 
+    n_hubs = 10, # 用于UMAP嵌入的hub genes
+    n_neighbors = 15, # UMAP参数
+    min_dist = 0.1 # 两个点（基因）在UMAP空间中的最短距离
+)
+umap_df <- GetModuleUMAP(seurat_obj)
+
+ggplot(umap_df, aes(x = UMAP1, y = UMAP2)) + # 设置坐标轴
+    geom_point(
+        color = umap_df$color, # 按module对点（gene）着色
+        size = umap_df$kME * 2 # 点的大小与其kME值相关
+    ) + 
+    umap_theme()
+```
+
+
+```{r}
+ModuleUMAPPlot(
+    seurat_obj,
+    edge.alpha = 0.25,
+    sample_edges = T,
+    edge_prop = 0.1, # 采样10%的边用于可视化
+    label_hubs = 2, # 每个module用于展示的hub genes
+    keep_grey_edges = F
+)
+```
+
+```{r}
+
+# convert sex to factor
+seurat_obj$msex <- as.factor(seurat_obj$msex)
+
+# convert age_death to numeric
+seurat_obj$age_death <- as.numeric(seurat_obj$age_death)
+
+# 需要与模块进行关联的特征，该特征从Seurat_obj@meta.data抽取
+cur_traits <- c('braaksc', 'pmi', 'msex', 'age_death', 'doublet_scores', 'nCount_RNA', 'nFeature_RNA', 'total_counts_mt')
+
+# 将基因模块与特征进行关联
+seurat_obj <- ModuleTraitCorrelation(
+  seurat_obj,
+  traits = cur_traits,  # 需要与模块进行关联的特征
+  group.by = 'seurat_clusters'  # 该参数表示以cell_type进行分组，以cell_type为单位计算每个cell_type的模块-特征相关性矩阵
+)
+```
+
+```{r}
+View(seurat_obj@misc$Goblet$wgcna_modules)
+
+goblet_module <- seurat_obj@misc$Goblet$wgcna_modules %>%
+  filter(module != "grey")
+
+genelist <- rownames(goblet_module[goblet_module$module == "Goblet_module4",])
+p1
+
+
+mo4_go <- enrichGO(gene = genelist,
+                   OrgDb = org.Mm.eg.db,
+                   keyType = "SYMBOL",
+                   ont = "BP")
+dotplot(mo4_go)
+View(as.data.frame(mo3_go))
+```
+
+
+
+
+##所有的enterocyte
+```{r}
+enteroendocrine  <- subset(nos2,subset = seurat_clusters == 22)
+
+data <- merge(Enterocyte_data,y = enteroendocrine)
+
+View(data@meta.data)
+
+data@meta.data <- data@meta.data %>%
+  mutate(cell_type = ifelse(cell_type == "Epithelial cell","enteroendocrine",cell_type))
+
+table(data@meta.data$cell_type)
+
+enterocyte_all <- data
+
+enterocyte_all <- NormalizeData(enterocyte_all)
+enterocyte_all <- FindVariableFeatures(enterocyte_all)
+enterocyte_all <- ScaleData(enterocyte_all)
+enterocyte_all <- RunPCA(enterocyte_all)
+enterocyte_all <- FindNeighbors(enterocyte_all)
+enterocyte_all <- RunUMAP(enterocyte_all,dims = 1:10)
+
+DimPlot(enterocyte_all,label = T,group.by = "cell_type")
+DimPlot(enterocyte_all,label = T,group.by = "cell_name")
+
+enterocyte_all@meta.data[enterocyte_all@meta.data$cell_type == "enteroendocrine",]$cell_name <- "enteroendocrine"
+
+saveRDS(enterocyte_all,"./all_enterocyte/data/enterocyte_all.rds")
+```   
+
+
+
+
+
+
+
+
+
+#Bcell
+##整体分析
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+View(nos2@meta.data)
+sam.name <- "B_cell"
+dir.create(sam.name)
+dir.create(paste0("./",sam.name,"/data"))
+dir.create(paste0("./",sam.name,"/subset"))
+
+# 创建一个只包含 "T cell" 的 Seurat 对象
+B_cell_data <- subset(nos2, subset = cell_type == "B/Plasma cell")
+
+B_cell_data <- NormalizeData(B_cell_data)
+B_cell_data <- FindVariableFeatures(B_cell_data, 
+                                             selection.method = "vst",
+                                             nfeatures = 1000)
+
+
+B_cell_data <- ScaleData(B_cell_data)
+
+top10 <- head(x = VariableFeatures(B_cell_data), 10)
+plot1 <- VariableFeaturePlot(B_cell_data)
+plot2 <- LabelPoints(plot = plot1, points = top10)
+pdf(file = paste0("./",sam.name,"/",sam.name,"_Norm-feature_variableplot.pdf"),width = 12,height = 8)
+CombinePlots(plots = list(plot1, plot2),legend = "none")
+dev.off()
+
+# 运行 PCA
+B_cell_data <- RunPCA(B_cell_data, 
+                          features = VariableFeatures(object = B_cell_data))
+#PCA结果展示-1
+pdf(paste0("./",sam.name,"/",sam.name,"PCA-VizDimLoadings.pdf"),width = 7,height = 5)
+VizDimLoadings(B_cell_data, dims = 1:2, reduction = "pca")
+dev.off()
+#PCA结果展示-2
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot.pdf"),width = 10,height = 8)
+DimPlot(B_cell_data, reduction = "pca")
+dev.off()
+#PCA结果展示-3
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot_group.pdf"),width = 10,height = 8)
+DimPlot(B_cell_data, reduction = "pca",split.by = "group")
+dev.off()
+#PCA热图
+pcadim <- 15
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimHeatmap_","pcadim=",pcadim,".pdf"),width = 10,height = 8)
+DimHeatmap(B_cell_data, dims = 1:pcadim, cells = 500, balanced = TRUE)
+dev.off()
+
+B_cell_data <- JackStraw(B_cell_data,num.replicate = 100,dims = 40)
+pdf(paste0("./",sam.name,"/PCA-JackStrawPlot_40_",sam.name,".pdf"),width = 12,height = 10)
+JackStrawPlot(object = B_cell_data, dims = 1:40)
+dev.off()
+
+
+B_cell_data <- ScoreJackStraw(B_cell_data, dims = 1:40)
+pdf(paste0("./",sam.name,"/PCA-ElbowPlot_",sam.name,".pdf"),width = 6,height = 5)
+ElbowPlot(B_cell_data,ndims = 40)
+dev.off()
+
+
+
+dim.use = 1:11
+# 运行 t-SNE 或 UMAP 降维
+B_cell_data <- RunTSNE(B_cell_data, dims = dim.use)
+# 或者
+B_cell_data <- RunUMAP(B_cell_data, dims = dim.use)
+
+
+res = 0.4
+# 寻找聚类
+B_cell_data <- FindNeighbors(B_cell_data, dims = dim.use)
+B_cell_data <- FindClusters(B_cell_data, resolution = res)
+
+
+# 可视化结果
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"PC.pdf"),width = 5,height = 4)
+DimPlot(object = B_cell_data, pt.size=0.6,label = T)
+dev.off()
+
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"_split","PC.pdf"),width = 8,height = 5)
+DimPlot(object = B_cell_data, pt.size=0.6,label = T,split.by = "group")
+dev.off()
+
+
+
+#找差异基因
+B.cell<- FindAllMarkers(B_cell_data, only.pos = TRUE, 
+                              min.pct = 0.3, logfc.threshold = 0.25)
+write.table(B.cell,
+            file=paste0("./",sam.name,"/",sam.name,"_total_marker_genes_tsne_",as.character(res),"_",max(dim.use),"PC.txt"),
+            sep="\t",quote = F,row.names = F)
+
+
+# 计算每个实验组在每个 cluster 中的细胞数量
+cell_counts <- table(B_cell_data@meta.data$group, B_cell_data@meta.data$seurat_clusters)
+
+# 将数据转换为 data frame 并为列命名
+cell_counts_df <- as.data.frame.table(cell_counts)
+names(cell_counts_df) <- c("group", "cluster", "cell_count")
+
+# 计算每个 cluster 在每个 group 中的百分比
+cell_counts_df$percentage <- ave(cell_counts_df$cell_count, cell_counts_df$group, FUN = function(x) x / sum(x) * 100)
+
+# 对比两组中每个 cluster 的百分比
+pdf(paste0("./",sam.name,"/","resoluton=",res,"_",sam.name,"_cluster_percentage.pdf"))
+ggplot(cell_counts_df, aes(x = cluster, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  xlab("Cluster") +
+  ylab("Percentage of cells (%)") +
+  ggtitle(paste0("Percentage of cells in each cluster for ",sam.name)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+
+saveRDS(B_cell_data,paste0("./",sam.name,"/data/",sam.name,"_data.rds"))
+saveRDS(cell_counts_df,paste0("./",sam.name,"/data/",sam.name,"_count_df.rds"))
+write.xlsx(cell_counts_df,paste0("./",sam.name,"/",sam.name,"_count_df.xlsx"))
+
+```
+##B_cell 0-7
+```{r}
+
+sam.name <- "B_cell"
+
+for(clu_num in 0:7){
+  
+  cluster <- paste0("cluster",as.character(clu_num))
+  dir.create(paste0("./",sam.name,"/subset/",cluster))
+  
+#需要修改
+  df <- B_cell_data@meta.data[c("group", "seurat_clusters")]
+  df$is_cluster <- df$seurat_clusters == clu_num
+  contingency_table <- table(df$group, df$is_cluster)
+  chisq_test <- chisq.test(contingency_table)
+  
+  observed <- chisq_test$observed
+  expected <- chisq_test$expected
+  residuals <- (observed - expected) / sqrt(expected)
+  
+  significant_residuals <- which(abs(residuals) > 2, arr.ind = TRUE)
+  
+    # 创建并写入卡方检验和残差分析的结果
+  result_filename <- paste0("./",sam.name,"/subset/",cluster,"/cluster_test_result.xlsx")
+  df_to_write <- data.frame(
+    "Chi-square test result" = toString(chisq_test),
+    "Standardized residuals" = toString(residuals),
+    "Significant residuals (row and column indices)" = toString(significant_residuals)
+  )
+  write.xlsx(df_to_write, result_filename)
+
+  
+  # 以下是你原有的代码，我假设它们在这个循环中应该保持不变
+  # 取出你感兴趣的群体
+#需要修改
+  cluster_data <- subset(B_cell_data, subset = seurat_clusters == clu_num & group %in% c("Control","24h", "48h"))
+  cluster_data <- subset(cluster_data, subset = nFeature_RNA > 200)
+  cluster_data <- cluster_data[ , cluster_data$nCount_RNA > 0]
+  
+  # 将数据转换为DESeqDataSet
+  dds <- DESeqDataSetFromMatrix(countData = cluster_data@assays$RNA@counts + 1,
+                              colData = cluster_data@meta.data,
+                              design = ~ group)
+  dds$group <- relevel(dds$group, ref = "Control")
+  # 进行差异表达分析
+  dds <- DESeq(dds)
+
+  # 获取差异表达的结果
+  res <- results(dds)
+  res_df <- as.data.frame(res)
+  write.xlsx(res_df,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG.xlsx"),rowNames = T)
+  saveRDS(res,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_deg_data.rds"))
+
+
+
+
+  #   选择显著差异表达的基因
+  sig_genes <- rownames(res)[res$pvalue < 0.05 & (abs(res$log2FoldChange) > 1)]
+  sig_genes <- sig_genes[!is.na(sig_genes)]
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_total_",as.character(length(sig_genes)),".txt"))
+  
+  res.Control.vs.24h <- results(dds, contrast = c("group", "24h", "Control"))
+  res.Control.vs.48h <- results(dds, contrast = c("group", "48h", "Control"))
+  res.24h.vs.48h <- results(dds, contrast = c("group", "48h", "24h"))
+  
+  sig_genes.Control.vs.24h <- rownames(res.Control.vs.24h)[which(res.Control.vs.24h$pvalue < 0.05 & abs(res.Control.vs.24h$log2FoldChange) > 1)]
+  sig_genes.Control.vs.48h <- rownames(res.Control.vs.48h)[which(res.Control.vs.48h$pvalue < 0.05 & abs(res.Control.vs.48h$log2FoldChange) > 1)]
+  sig_genes.24h.vs.48h <- rownames(res.24h.vs.48h)[which(res.24h.vs.48h$pvalue < 0.05 & abs(res.24h.vs.48h$log2FoldChange) > 1)]
+  
+  sig_genes.Control.vs.24h.48h <- union(sig_genes.Control.vs.24h, sig_genes.Control.vs.48h)
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_con_",as.character(length(sig_genes.Control.vs.24h.48h)),".txt"))
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_24h_",as.character(length(sig_genes.24h.vs.48h)),".txt"))
+
+  
+  mart <- readRDS("./mart.rds")
+  #开始算control vs 24 48
+  gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.Control.vs.24h.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_control <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control <- data.frame(ego_ALL_control)
+  ego_all_control <- ego_all_control[order(ego_all_control$p.adjust),]
+  ego_all_control <- ego_all_control %>%
+    arrange(desc(Count))
+  ego_all_control_top30 <- ego_all_control[1 : 30,]
+  p_con <- ggplot(data=ego_all_control_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  #开始计算
+  gene_result_24_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.24h.vs.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_24h <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  ego_all_24h <- data.frame(ego_ALL_24h)
+  write.csv(ego_all_24h,paste0("./",sam.name,"/subset/",cluster,"/enrichGO_all_24h.csv"))
+  
+  ego_all_24h <- ego_all_24h[order(ego_all_24h$p.adjust),]
+  ego_all_24h <- ego_all_24h %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h[1 : 30,]
+
+  p_24h <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con,p_24h)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_allont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+
+  # BP富集
+  ego_ALL_control_BP <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control_bp <- data.frame(ego_ALL_control_BP)
+  ego_all_control_bp <- ego_all_control_bp[order(ego_all_control_bp$p.adjust),]
+  ego_all_control_bp <- ego_all_control_bp %>%
+    arrange(desc(Count))
+  ego_all_control_bp_top30 <- ego_all_control_bp[1 : 30,]
+  p_con_bp <- ggplot(data=ego_all_control_bp_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  
+  ego_ALL_24h_BP <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h_bp <- data.frame(ego_ALL_24h_BP)
+  ego_all_24h_bp <- ego_all_24h_bp[order(ego_all_24h$p.adjust),]
+  ego_all_24h_bp <- ego_all_24h_bp %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h_bp[1 : 30,]
+
+  p_24h_bp <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con_bp,p_24h_bp)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_bp_ont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+  #kegg
+  clu_kegg_con <- enrichKEGG(gene = na.omit(gene_result_con_vs$entrezgene_id), 
+                         organism = 'mmu')
+  clu_kegg_24h <- enrichKEGG(gene = na.omit(gene_result_24_vs$entrezgene_id), 
+                         organism = 'mmu')
+  
+  p_con1 <- barplot(clu_kegg_con, showCategory=12)
+  p_con2 <- dotplot(clu_kegg_con, showCategory=12)
+  plotc_1 = p_con1/p_con2
+  
+  p_con3 <- barplot(clu_kegg_24h, showCategory=12)
+  p_con4 <- dotplot(clu_kegg_24h, showCategory=12)
+  plotc_2 = p_con3/p_con4 
+  
+  try(p_combined_kegg <- plot_grid(plotc_1,plotc_2),silent = T)
+  
+  try(ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"enrich_KEGG.pdf"), plot = p_combined_kegg, width = 36, height = 30),silent = T)
+
+  
+  
+  #############################
+  
+  # 第一张图: 三个组别用sig_genes.Control.vs.24h.48h基因来做热图
+
+  exprs_data_1 <- cluster_data[["RNA"]]@data[sig_genes.Control.vs.24h.48h, ]
+
+  # 标准化数据
+  exprs_data_1 <- t(scale(t(exprs_data_1)))
+
+  # 添加分组信息
+  ha_1 = HeatmapAnnotation(df = data.frame(group = cluster_data@meta.data$group),
+                       col = list(group = c("Control" = "#00b0eb", "24h" = "#ffd401", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_1 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data@meta.data$group)))))
+
+  # 绘制热图
+  col_fun = circlize::colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+  heatmap_1 = Heatmap(exprs_data_1, 
+                  name = "expression", 
+                  top_annotation = ha_1, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_1)
+  
+
+
+# 第二张图: 24h组和48h组用sig_genes.24h.vs.48h基因来做热图
+
+  cluster_data_2 <- subset(cluster_data, subset = group %in% c("24h", "48h"))
+
+  exprs_data_2 <- cluster_data_2[["RNA"]]@data[sig_genes.24h.vs.48h, ]
+
+  # 标准化数据
+  exprs_data_2 <- t(scale(t(exprs_data_2)))
+
+  # 添加分组信息
+  ha_2 = HeatmapAnnotation(df = data.frame(group = cluster_data_2@meta.data$group),
+                       col = list(group = c("24h" = "#3f60aa", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_2 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data_2@meta.data$group)))))
+
+  # 绘制热图
+  heatmap_2 = Heatmap(exprs_data_2, 
+                  name = "expression", 
+                  top_annotation = ha_2, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_2)
+
+  pdf(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_heatmap.pdf"), width = 20, height = 15)
+  layout(matrix(1:2,2,1))
+  draw(heatmap_1, heatmap_legend_side = "bot")
+  draw(heatmap_2, heatmap_legend_side = "bot")
+  dev.off()
+
+}
+
+
+
+
+
+
+```
+
+
+
+
+##B细胞和浆细胞分析
+```{r}
+B_cell <- readRDS("./B_cell/data/B_cell_data.rds")
+B_real_cell <- subset(B_cell,subset = seurat_clusters %in% c(0,1,3,5))
+plasma_cell <- subset(B_cell,subset = seurat_clusters %in% c(2,4,6,7))
+
+UMAPPlot(B_cell,label = T)
+TSNEPlot(B_cell,label = T)
+
+VlnPlot(B_cell,c("Pdia4","Myc",
+                 "Cd19","Cd38",
+                 "Ly6c2","Jchain",#Plasma B cell
+                 "Birc5","Hmgb2"),
+        stack = T,flip = T)
+
+
+VlnPlot(B_cell,c("Sell",#naive B cell
+                 "Jchain","Ccr10",#Plasma cell
+                 "Cd9",
+                 "Ifi47",
+                 "Myc","Nfkbid","Hspa1a",#GC B cell LZ 
+                 "Fas","Cd86","Cd38","Cxcr4",#GC B cell
+                 "Cd3g","Thy1"),#T细胞
+        stack = T,flip = T)
+
+#cluster0 和 1
+VlnPlot(B_cell,c("Cd19","Ms4a1","Cr2","Fcer2a","Cd38","Cd24a","Ptprc","Sell"),
+        stack = T,flip = T)
+
+
+DimPlot(B_cell,split.by = "group",label = T)
+
+cluster0_1_marker <- FindMarkers(B_cell,ident.1 = 0,ident.2 = 1)
+```
+
+```{r}
+B_real_cell <- my_sc_flow(B_real_cell,"B_real_cell","B_real_cell")
+
+DimPlot(B_real_cell)
+
+B_real_cell@meta.data$seurat_clusters[B_real_cell@meta.data$seurat_clusters == 1] <- 0
+
+table(B_real_cell@meta.data$seurat_clusters)
+
+VlnPlot(B_real_cell,c("Sell",#naive B cell
+                 "Jchain","Ccr10",#Plasma cell
+                 "Cd9",
+                 "Ifi47",
+                 "Myc","Nfkbid","Hspa1a",#GC B cell LZ 
+                 "Fas","Cd86","Cd38","Cxcr4",#GC B cell
+                 "Cd3g","Thy1"),#T细胞
+        stack = T,flip = T)
+
+VlnPlot(B_real_cell,c("Pdia4","Myc",
+                 "Cd19","Cd38",
+                 "Ly6c2","Jchain",#Plasma B cell
+                 "Birc5","Hmgb2"),
+        stack = T,flip = T)
+
+
+marker_b <- FindMarkers(B_real_cell,ident.1 = 0,ident.2 = 1)
+
+rownames(marker_b)[1:20]
+
+```
+
+
+##B细胞数量改变
+```{r}
+# 首先计算每个分组中每种细胞类型的百分比
+grouped_metadata <- Mesenchymal_sub@meta.data %>%
+  group_by(group, cell_name) %>%
+  summarise(n = n(), .groups = "drop") %>%
+  group_by(group) %>%
+  mutate(freq = n / sum(n))
+
+# 针对每个细胞类型计算24h和Control，48h和24h的变化比例
+change_ratio <- grouped_metadata %>%
+  group_by(cell_name) %>%
+  summarise(`24h_vs_Control` = (freq[group == "24h"] - freq[group == "Control"]) / freq[group == "Control"],
+            `48h_vs_24h` = (freq[group == "48h"] - freq[group == "24h"]) / freq[group == "24h"], .groups = "drop")
+```
+
+
+#Macrophage
+##整体分析
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+View(nos2@meta.data)
+sam.name <- "Macrophage"
+dir.create(sam.name)
+dir.create(paste0("./",sam.name,"/data"))
+dir.create(paste0("./",sam.name,"/subset"))
+
+# 创建一个只包含 "T cell" 的 Seurat 对象
+Macrophage_data <- subset(nos2, subset = cell_type == "Macrophage")
+
+Macrophage_data <- NormalizeData(Macrophage_data)
+Macrophage_data <- FindVariableFeatures(Macrophage_data, 
+                                             selection.method = "vst",
+                                             nfeatures = 1000)
+
+
+Macrophage_data <- ScaleData(Macrophage_data)
+
+top10 <- head(x = VariableFeatures(Macrophage_data), 10)
+plot1 <- VariableFeaturePlot(Macrophage_data)
+plot2 <- LabelPoints(plot = plot1, points = top10)
+pdf(file = paste0("./",sam.name,"/",sam.name,"_Norm-feature_variableplot.pdf"),width = 12,height = 8)
+CombinePlots(plots = list(plot1, plot2),legend = "none")
+dev.off()
+
+# 运行 PCA
+Macrophage_data <- RunPCA(Macrophage_data, 
+                          features = VariableFeatures(object = Macrophage_data))
+#PCA结果展示-1
+pdf(paste0("./",sam.name,"/",sam.name,"PCA-VizDimLoadings.pdf"),width = 7,height = 5)
+VizDimLoadings(Macrophage_data, dims = 1:2, reduction = "pca")
+dev.off()
+#PCA结果展示-2
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot.pdf"),width = 10,height = 8)
+DimPlot(B_cell_data, reduction = "pca")
+dev.off()
+#PCA结果展示-3
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot_group.pdf"),width = 10,height = 8)
+DimPlot(Macrophage_data, reduction = "pca",split.by = "group")
+dev.off()
+#PCA热图
+pcadim <- 15
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimHeatmap_","pcadim=",pcadim,".pdf"),width = 10,height = 8)
+DimHeatmap(Macrophage_data, dims = 1:pcadim, cells = 500, balanced = TRUE)
+dev.off()
+
+Macrophage_data <- JackStraw(Macrophage_data,num.replicate = 100,dims = 40)
+Macrophage_data <- ScoreJackStraw(Macrophage_data, dims = 1:40)
+
+pdf(paste0("./",sam.name,"/PCA-JackStrawPlot_40_",sam.name,".pdf"),width = 12,height = 10)
+JackStrawPlot(object = Macrophage_data, dims = 1:40)
+dev.off()
+
+
+
+pdf(paste0("./",sam.name,"/PCA-ElbowPlot_",sam.name,".pdf"),width = 6,height = 5)
+ElbowPlot(Macrophage_data,ndims = 40)
+dev.off()
+
+
+
+dim.use = 1:9
+# 运行 t-SNE 或 UMAP 降维
+Macrophage_data <- RunTSNE(Macrophage_data, dims = dim.use)
+# 或者
+Macrophage_data <- RunUMAP(Macrophage_data, dims = dim.use)
+
+
+res = 0.4
+# 寻找聚类
+Macrophage_data <- FindNeighbors(Macrophage_data, dims = dim.use)
+Macrophage_data <- FindClusters(Macrophage_data, resolution = res)
+
+
+# 可视化结果
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"PC.pdf"),width = 5,height = 4)
+DimPlot(object = Macrophage_data, pt.size=0.6,label = T)
+dev.off()
+
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"_split","PC.pdf"),width = 8,height = 5)
+DimPlot(object = Macrophage_data, pt.size=0.6,label = T,split.by = "group")
+dev.off()
+
+
+
+#找差异基因
+Macrophage.cell<- FindAllMarkers(Macrophage_data, only.pos = TRUE, 
+                              min.pct = 0.3, logfc.threshold = 0.25)
+write.table(Macrophage.cell,
+            file=paste0("./",sam.name,"/",sam.name,"_total_marker_genes_tsne_",as.character(res),"_",max(dim.use),"PC.txt"),
+            sep="\t",quote = F,row.names = F)
+
+
+# 计算每个实验组在每个 cluster 中的细胞数量
+cell_counts <- table(Macrophage_data@meta.data$group, Macrophage_data@meta.data$seurat_clusters)
+
+# 将数据转换为 data frame 并为列命名
+cell_counts_df <- as.data.frame.table(cell_counts)
+names(cell_counts_df) <- c("group", "cluster", "cell_count")
+
+# 计算每个 cluster 在每个 group 中的百分比
+cell_counts_df$percentage <- ave(cell_counts_df$cell_count, cell_counts_df$group, FUN = function(x) x / sum(x) * 100)
+
+# 对比两组中每个 cluster 的百分比
+pdf(paste0("./",sam.name,"/","resoluton=",res,"_",sam.name,"_cluster_percentage.pdf"))
+ggplot(cell_counts_df, aes(x = cluster, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  xlab("Cluster") +
+  ylab("Percentage of cells (%)") +
+  ggtitle(paste0("Percentage of cells in each cluster for ",sam.name)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+
+saveRDS(Macrophage_data,paste0("./",sam.name,"/data/",sam.name,"_data.rds"))
+saveRDS(cell_counts_df,paste0("./",sam.name,"/data/",sam.name,"_count_df.rds"))
+write.xlsx(cell_counts_df,paste0("./",sam.name,"/",sam.name,"_count_df.xlsx"))
+```
+##Macrophage亚群0-10
+```{r}
+for(clu_num in 0:10){
+  
+  cluster <- paste0("cluster",as.character(clu_num))
+  dir.create(paste0("./",sam.name,"/subset/",cluster))
+  
+#需要修改
+  df <- Macrophage_data@meta.data[c("group", "seurat_clusters")]
+  df$is_cluster <- df$seurat_clusters == clu_num
+  contingency_table <- table(df$group, df$is_cluster)
+  chisq_test <- chisq.test(contingency_table)
+  
+  observed <- chisq_test$observed
+  expected <- chisq_test$expected
+  residuals <- (observed - expected) / sqrt(expected)
+  
+  significant_residuals <- which(abs(residuals) > 2, arr.ind = TRUE)
+  
+    # 创建并写入卡方检验和残差分析的结果
+  result_filename <- paste0("./",sam.name,"/subset/",cluster,"/cluster_test_result.xlsx")
+  df_to_write <- data.frame(
+    "Chi-square test result" = toString(chisq_test),
+    "Standardized residuals" = toString(residuals),
+    "Significant residuals (row and column indices)" = toString(significant_residuals)
+  )
+  write.xlsx(df_to_write, result_filename)
+
+  
+  # 以下是你原有的代码，我假设它们在这个循环中应该保持不变
+  # 取出你感兴趣的群体
+#需要修改
+  cluster_data <- subset(Macrophage_data, subset = seurat_clusters == clu_num & group %in% c("Control","24h", "48h"))
+  cluster_data <- subset(cluster_data, subset = nFeature_RNA > 200)
+  cluster_data <- cluster_data[ , cluster_data$nCount_RNA > 0]
+  
+  # 将数据转换为DESeqDataSet
+  dds <- DESeqDataSetFromMatrix(countData = cluster_data@assays$RNA@counts + 1,
+                              colData = cluster_data@meta.data,
+                              design = ~ group)
+  dds$group <- relevel(dds$group, ref = "Control")
+  # 进行差异表达分析
+  dds <- DESeq(dds)
+
+  # 获取差异表达的结果
+  res <- results(dds)
+  res_df <- as.data.frame(res)
+  write.xlsx(res_df,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG.xlsx"),rowNames = T)
+  saveRDS(res,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_deg_data.rds"))
+
+
+
+
+  #   选择显著差异表达的基因
+  sig_genes <- rownames(res)[res$pvalue < 0.05 & (abs(res$log2FoldChange) > 1)]
+  sig_genes <- sig_genes[!is.na(sig_genes)]
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_total_",as.character(length(sig_genes)),".txt"))
+  
+  res.Control.vs.24h <- results(dds, contrast = c("group", "24h", "Control"))
+  res.Control.vs.48h <- results(dds, contrast = c("group", "48h", "Control"))
+  res.24h.vs.48h <- results(dds, contrast = c("group", "48h", "24h"))
+  
+  sig_genes.Control.vs.24h <- rownames(res.Control.vs.24h)[which(res.Control.vs.24h$pvalue < 0.05 & abs(res.Control.vs.24h$log2FoldChange) > 1)]
+  sig_genes.Control.vs.48h <- rownames(res.Control.vs.48h)[which(res.Control.vs.48h$pvalue < 0.05 & abs(res.Control.vs.48h$log2FoldChange) > 1)]
+  sig_genes.24h.vs.48h <- rownames(res.24h.vs.48h)[which(res.24h.vs.48h$pvalue < 0.05 & abs(res.24h.vs.48h$log2FoldChange) > 1)]
+  
+  sig_genes.Control.vs.24h.48h <- union(sig_genes.Control.vs.24h, sig_genes.Control.vs.48h)
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_con_",as.character(length(sig_genes.Control.vs.24h.48h)),".txt"))
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_24h_",as.character(length(sig_genes.24h.vs.48h)),".txt"))
+
+  
+  mart <- readRDS("./mart.rds")
+  #开始算control vs 24 48
+  gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.Control.vs.24h.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_control <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control <- data.frame(ego_ALL_control)
+  ego_all_control <- ego_all_control[order(ego_all_control$p.adjust),]
+  ego_all_control <- ego_all_control %>%
+    arrange(desc(Count))
+  ego_all_control_top30 <- ego_all_control[1 : 30,]
+  p_con <- ggplot(data=ego_all_control_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  #开始计算
+  gene_result_24_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.24h.vs.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_24h <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h <- data.frame(ego_ALL_24h)
+  write.csv(ego_all_24h,paste0("./",sam.name,"/subset/",cluster,"/enrichGO_all_24h.csv"))
+  
+  ego_all_24h <- ego_all_24h[order(ego_all_24h$p.adjust),]
+  ego_all_24h <- ego_all_24h %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h[1 : 30,]
+
+  p_24h <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con,p_24h)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_allont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+
+  # BP富集
+  ego_ALL_control_BP <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control_bp <- data.frame(ego_ALL_control_BP)
+  ego_all_control_bp <- ego_all_control_bp[order(ego_all_control_bp$p.adjust),]
+  ego_all_control_bp <- ego_all_control_bp %>%
+    arrange(desc(Count))
+  ego_all_control_bp_top30 <- ego_all_control_bp[1 : 30,]
+  p_con_bp <- ggplot(data=ego_all_control_bp_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  
+  ego_ALL_24h_BP <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h_bp <- data.frame(ego_ALL_24h_BP)
+  ego_all_24h_bp <- ego_all_24h_bp[order(ego_all_24h$p.adjust),]
+  ego_all_24h_bp <- ego_all_24h_bp %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h_bp[1 : 30,]
+
+  p_24h_bp <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con_bp,p_24h_bp)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_bp_ont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+  #kegg
+  clu_kegg_con <- enrichKEGG(gene = na.omit(gene_result_con_vs$entrezgene_id), 
+                         organism = 'mmu')
+  clu_kegg_24h <- enrichKEGG(gene = na.omit(gene_result_24_vs$entrezgene_id), 
+                         organism = 'mmu')
+  
+  p_con1 <- barplot(clu_kegg_con, showCategory=12)
+  p_con2 <- dotplot(clu_kegg_con, showCategory=12)
+  plotc_1 = p_con1/p_con2
+  
+  p_con3 <- barplot(clu_kegg_24h, showCategory=12)
+  p_con4 <- dotplot(clu_kegg_24h, showCategory=12)
+  plotc_2 = p_con3/p_con4 
+  
+  try(p_combined_kegg <- plot_grid(plotc_1,plotc_2),silent = T)
+  
+  try(ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"enrich_KEGG.pdf"), plot = p_combined_kegg, width = 36, height = 30),silent = T)
+
+  
+  
+  #############################
+  
+  # 第一张图: 三个组别用sig_genes.Control.vs.24h.48h基因来做热图
+
+  exprs_data_1 <- cluster_data[["RNA"]]@data[sig_genes.Control.vs.24h.48h, ]
+
+  # 标准化数据
+  exprs_data_1 <- t(scale(t(exprs_data_1)))
+
+  # 添加分组信息
+  ha_1 = HeatmapAnnotation(df = data.frame(group = cluster_data@meta.data$group),
+                       col = list(group = c("Control" = "#00b0eb", "24h" = "#ffd401", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_1 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data@meta.data$group)))))
+
+  # 绘制热图
+  col_fun = circlize::colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+  heatmap_1 = Heatmap(exprs_data_1, 
+                  name = "expression", 
+                  top_annotation = ha_1, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_1)
+
+
+
+# 第二张图: 24h组和48h组用sig_genes.24h.vs.48h基因来做热图
+
+  cluster_data_2 <- subset(cluster_data, subset = group %in% c("24h", "48h"))
+
+  exprs_data_2 <- cluster_data_2[["RNA"]]@data[sig_genes.24h.vs.48h, ]
+
+  # 标准化数据
+  exprs_data_2 <- t(scale(t(exprs_data_2)))
+
+  # 添加分组信息
+  ha_2 = HeatmapAnnotation(df = data.frame(group = cluster_data_2@meta.data$group),
+                       col = list(group = c("24h" = "#3f60aa", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_2 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data_2@meta.data$group)))))
+
+  # 绘制热图
+  heatmap_2 = Heatmap(exprs_data_2, 
+                  name = "expression", 
+                  top_annotation = ha_2, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_2)
+
+
+
+  
+  pdf(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_heatmap.pdf"), width = 20, height = 15)
+  layout(matrix(1:2,2,1))
+  draw(heatmap_1, heatmap_legend_side = "bot")
+  draw(heatmap_2, heatmap_legend_side = "bot")
+  dev.off()
+}
+
+
+
+
+
+
+```
+
+
+
+
+
+##亚群定义
+```{r}
+Macrophage <- readRDS("./Macrophage/data/Macrophage_data.rds")
+
+
+Macrophage_sub <- subset(Macrophage,subset = seurat_clusters %in% c(0:8))
+DimPlot(Macrophage_sub,label = T,split.by = "group")
+
+#cluster12的特异基因
+VlnPlot(Macrophage_sub,c("Lyz2","Il1b","Cxcl2","Apoe","Tyrobp","Cst3","Ccl4","Cd14","Cd163"),
+        stack = T,flip = T)
+
+
+#M2型巨噬细胞的marker
+VlnPlot(Macrophage_sub,c("Cd163"))
+
+#M1型巨噬细胞
+VlnPlot(Macrophage_sub,c("Nos2","Tnf","Il1b","Il6","Ccr7"),
+        stack = T,flip = T)
+
+#monocyte-derived macrophages 1  MDMs
+VlnPlot(Macrophage_sub,c("Ly6c2","Ccr2"),
+        stack = T,flip = T)
+
+#gut-resident macrophages 0 5
+VlnPlot(Macrophage_sub,c("Cd68","Cx3cr1","Fcgr1","Adgre1","Cd63"),
+        stack = T,flip = T)
+
+#cluster 2 抗原提取 CD103+ CD11b+ 树突状细胞
+#cluster 3  CD103- CD11b+
+#CD103 Itgae      CD11b Itgam
+VlnPlot(Macrophage_sub,c("Ptprc","Bst2","Itgax","Clec9a","Itgam","Ly6c2","Lamp2"),
+        stack = T,flip = T)
+FeaturePlot(Macrophage_sub,c("Cd209a","Itgax"))
+#2 3 4 6 7
+#3 6 7 混入其中的细胞
+
+#2 -+ 确定 CD103- CD11b+ cDC2细胞
+VlnPlot(Macrophage_sub,c("Itgae","Itgam","Cd24a","Cd209a","Itgax"),
+        stack = T,flip = T)
+
+#4 +- 确定 CD103+ CD11b- cDC1
+VlnPlot(Macrophage_sub,c("Itgae","Itgam","Cd24a","Clec9a"),
+        stack = T,flip = T)
+
+
+
+```
+
+
+
+```{r}
+
+res <- FindMarkers(Macrophage_sub,ident.1 = 6,ident.2 = 3)
+
+RidgePlot(Macrophage_sub,c("Muc2","Tff3","Alpi","Fabp1","Fabp2"),ncol = 1)
+
+VlnPlot(nos2,c("Muc2"))
+
+FeaturePlot(nos2,c("Muc2","Cx3cr1"),label = T)
+
+table(Macrophage_sub@meta.data$seurat_clusters)
+Macrophage_sub@meta.data$seurat_clusters <- as.character(Macrophage_sub@meta.data$seurat_clusters)
+
+Macrophage_sub <- subset(Macrophage_sub,subset = seurat_clusters %in% c(0,1,2,4,5))
+
+Macrophage_sub@meta.data <- Macrophage_sub@meta.data %>%
+  mutate(cell_name  = case_when(
+    seurat_clusters %in% c(0,5) ~ "gMAC",
+    seurat_clusters == 1 ~ "MDM",
+    seurat_clusters == 2 ~ "cDC2",
+    seurat_clusters == 4 ~ "cDC1"
+  ))
+
+table(Macrophage_sub@meta.data$cell_name)
+
+saveRDS(Macrophage_sub,"./Macrophage/data/Macrophage_sub_data.rds")
+Macrophage_sub <- readRDS("./Macrophage/data/Macrophage_sub_data.rds")
+
+
+TSNEPlot(Macrophage_sub,label = T)
+```
+
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+
+data <- subset(nos2,subset = seurat_clusters == 12)
+
+sam.name <- "./Macrophage/reana"
+dir.create(sam.name)
+data <- my_sc_flow(data,sam.name,"re_analyzed_Macro")
+
+
+DimPlot(data,label = T)
+
+data <- subset(data,subse = seurat_clusters %in% c(0:4))
+
+#monocyte-derived macrophages 1 8 
+VlnPlot(data,c("Ly6c2","Ccr2"),
+        stack = T,flip = T)
+
+#肠道巨噬细胞 0 5
+VlnPlot(data,c("Cd68","Cx3cr1","Fcgr1","Adgre1","Cd63"),
+        stack = T,flip = T)
+```
+
+
+
+#Enterocyte
+##整体分析
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+nos2@meta.data <- nos2@meta.data %>%
+  mutate(cell_type = ifelse(seurat_clusters %in% c(1,2,7,8,9,10,13,14,16,25,28),"Enterocyte",cell_type))
+
+sam.name <- "Enterocyte"
+dir.create(sam.name)
+dir.create(paste0("./",sam.name,"/data"))
+dir.create(paste0("./",sam.name,"/subset"))
+
+# 创建一个只包含 "T cell" 的 Seurat 对象
+Enterocyte_data <- subset(nos2, subset = cell_type == "Enterocyte")
+
+Enterocyte_data <- NormalizeData(Enterocyte_data)
+Enterocyte_data <- FindVariableFeatures(Enterocyte_data, 
+                                             selection.method = "vst",
+                                             nfeatures = 1000)
+
+
+Enterocyte_data <- ScaleData(Enterocyte_data)
+
+top10 <- head(x = VariableFeatures(Enterocyte_data), 10)
+plot1 <- VariableFeaturePlot(Enterocyte_data)
+plot2 <- LabelPoints(plot = plot1, points = top10)
+pdf(file = paste0("./",sam.name,"/",sam.name,"_Norm-feature_variableplot.pdf"),width = 12,height = 8)
+CombinePlots(plots = list(plot1, plot2),legend = "none")
+dev.off()
+
+# 运行 PCA
+Enterocyte_data <- RunPCA(Enterocyte_data, 
+                          features = VariableFeatures(object = Enterocyte_data))
+#PCA结果展示-1
+pdf(paste0("./",sam.name,"/",sam.name,"PCA-VizDimLoadings.pdf"),width = 7,height = 5)
+VizDimLoadings(Enterocyte_data, dims = 1:2, reduction = "pca")
+dev.off()
+#PCA结果展示-2
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot.pdf"),width = 10,height = 8)
+DimPlot(Enterocyte_data, reduction = "pca")
+dev.off()
+#PCA结果展示-3
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot_group.pdf"),width = 10,height = 8)
+DimPlot(Enterocyte_data, reduction = "pca",split.by = "group")
+dev.off()
+#PCA热图
+pcadim <- 15
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimHeatmap_","pcadim=",pcadim,".pdf"),width = 10,height = 8)
+DimHeatmap(Enterocyte_data, dims = 1:pcadim, cells = 500, balanced = TRUE)
+dev.off()
+
+Enterocyte_data <- JackStraw(Enterocyte_data,num.replicate = 100,dims = 40)
+Enterocyte_data <- ScoreJackStraw(Enterocyte_data, dims = 1:40)
+
+pdf(paste0("./",sam.name,"/PCA-JackStrawPlot_40_",sam.name,".pdf"),width = 12,height = 10)
+JackStrawPlot(object = Enterocyte_data, dims = 1:40)
+dev.off()
+
+pdf(paste0("./",sam.name,"/PCA-ElbowPlot_",sam.name,".pdf"),width = 6,height = 5)
+ElbowPlot(Enterocyte_data,ndims = 40)
+dev.off()
+
+dim.use = 1:20
+# 运行 t-SNE 或 UMAP 降维
+Enterocyte_data <- RunTSNE(Enterocyte_data, dims = dim.use)
+# 或者
+Enterocyte_data <- RunUMAP(Enterocyte_data, dims = dim.use)
+
+
+res = 0.4
+# 寻找聚类
+Enterocyte_data <- FindNeighbors(Enterocyte_data, dims = dim.use)
+Enterocyte_data <- FindClusters(Enterocyte_data, resolution = res)
+
+
+# 可视化结果
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"PC.pdf"),width = 5,height = 4)
+DimPlot(object = Enterocyte_data, pt.size=0.6,label = T)
+dev.off()
+
+pdf(paste0("./",sam.name,"/",sam.name,"_CellCluster-UMAPPlot_res",as.character(res),"_dim",max(dim.use),"_split","PC.pdf"),width = 8,height = 5)
+DimPlot(object = Enterocyte_data, pt.size=0.6,label = T,split.by = "group")
+dev.off()
+
+
+
+#找差异基因
+Enterocyte.cell<- FindAllMarkers(Enterocyte_data, only.pos = TRUE, 
+                              min.pct = 0.3, logfc.threshold = 0.25)
+write.table(Enterocyte.cell,
+            file=paste0("./",sam.name,"/",sam.name,"_total_marker_genes_tsne_",as.character(res),"_",max(dim.use),"PC.txt"),
+            sep="\t",quote = F,row.names = F)
+
+
+# 计算每个实验组在每个 cluster 中的细胞数量
+cell_counts <- table(Enterocyte_data@meta.data$group, Enterocyte_data@meta.data$seurat_clusters)
+
+# 将数据转换为 data frame 并为列命名
+cell_counts_df <- as.data.frame.table(cell_counts)
+names(cell_counts_df) <- c("group", "cluster", "cell_count")
+
+# 计算每个 cluster 在每个 group 中的百分比
+cell_counts_df$percentage <- ave(cell_counts_df$cell_count, cell_counts_df$group, FUN = function(x) x / sum(x) * 100)
+
+# 对比两组中每个 cluster 的百分比
+pdf(paste0("./",sam.name,"/","resoluton=",res,"_",sam.name,"_cluster_percentage.pdf"))
+ggplot(cell_counts_df, aes(x = cluster, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  xlab("Cluster") +
+  ylab("Percentage of cells (%)") +
+  ggtitle(paste0("Percentage of cells in each cluster for ",sam.name)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+
+saveRDS(Enterocyte_data,paste0("./",sam.name,"/data/",sam.name,"_data.rds"))
+saveRDS(cell_counts_df,paste0("./",sam.name,"/data/",sam.name,"_count_df.rds"))
+write.xlsx(cell_counts_df,paste0("./",sam.name,"/",sam.name,"_count_df.xlsx"))
+```
+##亚群分析
+```{r}
+for(clu_num in 6:15){
+  
+  cluster <- paste0("cluster",as.character(clu_num))
+  dir.create(paste0("./",sam.name,"/subset/",cluster))
+  
+#需要修改
+  df <- Enterocyte_data@meta.data[c("group", "seurat_clusters")]
+  df$is_cluster <- df$seurat_clusters == clu_num
+  contingency_table <- table(df$group, df$is_cluster)
+  chisq_test <- chisq.test(contingency_table)
+  
+  observed <- chisq_test$observed
+  expected <- chisq_test$expected
+  residuals <- (observed - expected) / sqrt(expected)
+  
+  significant_residuals <- which(abs(residuals) > 2, arr.ind = TRUE)
+  
+    # 创建并写入卡方检验和残差分析的结果
+  result_filename <- paste0("./",sam.name,"/subset/",cluster,"/cluster_test_result.xlsx")
+  df_to_write <- data.frame(
+    "Chi-square test result" = toString(chisq_test),
+    "Standardized residuals" = toString(residuals),
+    "Significant residuals (row and column indices)" = toString(significant_residuals)
+  )
+  write.xlsx(df_to_write, result_filename)
+
+  
+  # 以下是你原有的代码，我假设它们在这个循环中应该保持不变
+  # 取出你感兴趣的群体
+#需要修改
+  cluster_data <- subset(Enterocyte_data, subset = seurat_clusters == clu_num & group %in% c("Control","24h", "48h"))
+  cluster_data <- subset(cluster_data, subset = nFeature_RNA > 200)
+  cluster_data <- cluster_data[ , cluster_data$nCount_RNA > 0]
+  
+  # 将数据转换为DESeqDataSet
+  dds <- DESeqDataSetFromMatrix(countData = cluster_data@assays$RNA@counts + 1,
+                              colData = cluster_data@meta.data,
+                              design = ~ group)
+  dds$group <- relevel(dds$group, ref = "Control")
+  # 进行差异表达分析
+  dds <- DESeq(dds)
+
+  # 获取差异表达的结果
+  res <- results(dds)
+  res_df <- as.data.frame(res)
+  write.xlsx(res_df,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG.xlsx"),rowNames = T)
+  saveRDS(res,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_deg_data.rds"))
+
+
+
+
+  #   选择显著差异表达的基因
+  sig_genes <- rownames(res)[res$pvalue < 0.05 & (abs(res$log2FoldChange) > 1)]
+  sig_genes <- sig_genes[!is.na(sig_genes)]
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_total_",as.character(length(sig_genes)),".txt"))
+  
+  res.Control.vs.24h <- results(dds, contrast = c("group", "24h", "Control"))
+  res.Control.vs.48h <- results(dds, contrast = c("group", "48h", "Control"))
+  res.24h.vs.48h <- results(dds, contrast = c("group", "48h", "24h"))
+  
+  sig_genes.Control.vs.24h <- rownames(res.Control.vs.24h)[which(res.Control.vs.24h$pvalue < 0.05 & abs(res.Control.vs.24h$log2FoldChange) > 1)]
+  sig_genes.Control.vs.48h <- rownames(res.Control.vs.48h)[which(res.Control.vs.48h$pvalue < 0.05 & abs(res.Control.vs.48h$log2FoldChange) > 1)]
+  sig_genes.24h.vs.48h <- rownames(res.24h.vs.48h)[which(res.24h.vs.48h$pvalue < 0.05 & abs(res.24h.vs.48h$log2FoldChange) > 1)]
+  
+  sig_genes.Control.vs.24h.48h <- union(sig_genes.Control.vs.24h, sig_genes.Control.vs.48h)
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_con_",as.character(length(sig_genes.Control.vs.24h.48h)),".txt"))
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_24h_",as.character(length(sig_genes.24h.vs.48h)),".txt"))
+
+  
+  mart <- readRDS("./mart.rds")
+  #开始算control vs 24 48
+  gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.Control.vs.24h.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_control <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control <- data.frame(ego_ALL_control)
+  ego_all_control <- ego_all_control[order(ego_all_control$p.adjust),]
+  ego_all_control <- ego_all_control %>%
+    arrange(desc(Count))
+  ego_all_control_top30 <- ego_all_control[1 : 30,]
+  p_con <- ggplot(data=ego_all_control_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  #开始计算
+  gene_result_24_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.24h.vs.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_24h <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h <- data.frame(ego_ALL_24h)
+  write.csv(ego_all_24h,paste0("./",sam.name,"/subset/",cluster,"/enrichGO_all_24h.csv"))
+  
+  ego_all_24h <- ego_all_24h[order(ego_all_24h$p.adjust),]
+  ego_all_24h <- ego_all_24h %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h[1 : 30,]
+
+  p_24h <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con,p_24h)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_allont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+
+  # BP富集
+  ego_ALL_control_BP <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control_bp <- data.frame(ego_ALL_control_BP)
+  ego_all_control_bp <- ego_all_control_bp[order(ego_all_control_bp$p.adjust),]
+  ego_all_control_bp <- ego_all_control_bp %>%
+    arrange(desc(Count))
+  ego_all_control_bp_top30 <- ego_all_control_bp[1 : 30,]
+  p_con_bp <- ggplot(data=ego_all_control_bp_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  
+  ego_ALL_24h_BP <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h_bp <- data.frame(ego_ALL_24h_BP)
+  ego_all_24h_bp <- ego_all_24h_bp[order(ego_all_24h$p.adjust),]
+  ego_all_24h_bp <- ego_all_24h_bp %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h_bp[1 : 30,]
+
+  p_24h_bp <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con_bp,p_24h_bp)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_bp_ont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+  #kegg
+  clu_kegg_con <- enrichKEGG(gene = na.omit(gene_result_con_vs$entrezgene_id), 
+                         organism = 'mmu')
+  clu_kegg_24h <- enrichKEGG(gene = na.omit(gene_result_24_vs$entrezgene_id), 
+                         organism = 'mmu')
+  
+  try(p_con1 <- barplot(clu_kegg_con, showCategory=12),silent = T)
+  try(p_con2 <- dotplot(clu_kegg_con, showCategory=12),silent = T)
+  plotc_1 = p_con1/p_con2
+  
+  try(p_con3 <- barplot(clu_kegg_24h, showCategory=12),silent = T)
+  try(p_con4 <- dotplot(clu_kegg_24h, showCategory=12),silent = T)
+  plotc_2 = p_con3/p_con4 
+  
+  try(p_combined_kegg <- plot_grid(plotc_1,plotc_2),silent = T)
+  
+  try(ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"enrich_KEGG.pdf"), plot = p_combined_kegg, width = 36, height = 30),silent = T)
+
+  
+  
+  #############################
+  
+  # 第一张图: 三个组别用sig_genes.Control.vs.24h.48h基因来做热图
+
+  exprs_data_1 <- cluster_data[["RNA"]]@data[sig_genes.Control.vs.24h.48h, ]
+
+  # 标准化数据
+  exprs_data_1 <- t(scale(t(exprs_data_1)))
+
+  # 添加分组信息
+  ha_1 = HeatmapAnnotation(df = data.frame(group = cluster_data@meta.data$group),
+                       col = list(group = c("Control" = "#00b0eb", "24h" = "#ffd401", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_1 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data@meta.data$group)))))
+
+  # 绘制热图
+  col_fun = circlize::colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+  heatmap_1 = Heatmap(exprs_data_1, 
+                  name = "expression", 
+                  top_annotation = ha_1, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_1)
+
+
+
+# 第二张图: 24h组和48h组用sig_genes.24h.vs.48h基因来做热图
+
+  cluster_data_2 <- subset(cluster_data, subset = group %in% c("24h", "48h"))
+
+  exprs_data_2 <- cluster_data_2[["RNA"]]@data[sig_genes.24h.vs.48h, ]
+
+  # 标准化数据
+  exprs_data_2 <- t(scale(t(exprs_data_2)))
+
+  # 添加分组信息
+  ha_2 = HeatmapAnnotation(df = data.frame(group = cluster_data_2@meta.data$group),
+                       col = list(group = c("24h" = "#3f60aa", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_2 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data_2@meta.data$group)))))
+
+  # 绘制热图
+  heatmap_2 = Heatmap(exprs_data_2, 
+                  name = "expression", 
+                  top_annotation = ha_2, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_2)
+
+
+
+  
+  pdf(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_heatmap.pdf"), width = 20, height = 15)
+  layout(matrix(1:2,2,1))
+  draw(heatmap_1, heatmap_legend_side = "bot")
+  draw(heatmap_2, heatmap_legend_side = "bot")
+  dev.off()
+}
+
+
+```
+##monocle3
+```{r}
+dir.create(paste0("./",sam.name,"/monocle"))
+
+cds <- SeuratWrappers::as.cell_data_set(Enterocyte_data)
+
+cds <- cds[ , , reduction_method = "UMAP"]
+
+cds <- cluster_cells(cds,cluster_method = "louvain")
+
+plot_cells(cds,show_trajectory_graph = F,
+           color_cells_by = "partition")
+
+cds <- learn_graph(cds,use_partition = F)
+
+#拟时序图
+DimPlot(Enterocyte_data,label = T)
+cds <- order_cells(cds,reduction_method = "UMAP")
+
+
+plot_cells(cds,color_cells_by = "cluster",show_trajectory_graph = F)
+
+root_node_cluster <- 0
+root_node <- paste0("cluster",root_node_cluster)
+pdf(paste0("./",sam.name,"/monocle/pseudotiem_use_root_node_",root_node,".pdf"))
+plot_cells(cds,color_cells_by = "pseudotime",label_branch_points = F,label_leaves = F)
+dev.off()
+saveRDS(cds,"./Enterocyte/data/enterocyte_cds.rds")
+cds <- readRDS("./B_cell/data/cds.rds")
+
+
+```
+
+```{r}
+Enterocyte_data <- readRDS("./Enterocyte/data/Enterocyte_data.rds")
+
+FeaturePlot(Enterocyte_data,c("Lgr5","Mki67","Reg4","Kit","Dclk1","Alpi","Chga","Spdef","Fabp2","Pou2f3","Mmp7"))
+
+genes <- c("Lgr5","Mki67","Reg4","Kit","Dclk1","Alpi","Chga","Spdef","Fabp2","Pou2f3","Mmp7")
+dot.plot <- DotPlot(Enterocyte_data, features = genes) + RotatedAxis()
+dot.plot + scale_color_gradientn(colors = c("orange", "skyblue"))
+
+DimPlot(Enterocyte_data,label = T)
+```
+
+
+#Mesenchymal cell
+##亚群整体分析
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+View(nos2@meta.data)
+sam.name <- "Mesenchymal_cell"
+dir.create(sam.name)
+dir.create(paste0("./",sam.name,"/data"))
+dir.create(paste0("./",sam.name,"/subset"))
+
+# 创建一个只包含 "T cell" 的 Seurat 对象
+Mesenchymal_cell_data <- subset(nos2, subset = cell_type == "Mesenchymal cell")
+
+Mesenchymal_cell_data <- NormalizeData(Mesenchymal_cell_data)
+Mesenchymal_cell_data <- FindVariableFeatures(Mesenchymal_cell_data, 
+                                             selection.method = "vst",
+                                             nfeatures = 1000)
+
+
+Mesenchymal_cell_data <- ScaleData(Mesenchymal_cell_data)
+
+top10 <- head(x = VariableFeatures(Mesenchymal_cell_data), 10)
+plot1 <- VariableFeaturePlot(Mesenchymal_cell_data)
+plot2 <- LabelPoints(plot = plot1, points = top10)
+pdf(file = paste0("./",sam.name,"/",sam.name,"_Norm-feature_variableplot.pdf"),width = 12,height = 8)
+CombinePlots(plots = list(plot1, plot2),legend = "none")
+dev.off()
+
+# 运行 PCA
+Mesenchymal_cell_data <- RunPCA(Mesenchymal_cell_data, 
+                          features = VariableFeatures(object = Mesenchymal_cell_data))
+#PCA结果展示-1
+pdf(paste0("./",sam.name,"/",sam.name,"PCA-VizDimLoadings.pdf"),width = 7,height = 5)
+VizDimLoadings(Mesenchymal_cell_data, dims = 1:2, reduction = "pca")
+dev.off()
+#PCA结果展示-2
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot.pdf"),width = 10,height = 8)
+DimPlot(Mesenchymal_cell_data, reduction = "pca")
+dev.off()
+#PCA结果展示-3
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimPlot_group.pdf"),width = 10,height = 8)
+DimPlot(Mesenchymal_cell_data, reduction = "pca",split.by = "group")
+dev.off()
+#PCA热图
+pcadim <- 20
+pdf(paste0("./",sam.name,"/",sam.name,"_PCA-DimHeatmap_","pcadim=",pcadim,".pdf"),width = 10,height = 8)
+DimHeatmap(Mesenchymal_cell_data, dims = 1:pcadim, cells = 500, balanced = TRUE)
+dev.off()
+
+Mesenchymal_cell_data <- JackStraw(Mesenchymal_cell_data,num.replicate = 100,dims = 40)
+Mesenchymal_cell_data <- ScoreJackStraw(Mesenchymal_cell_data, dims = 1:40)
+
+pdf(paste0("./",sam.name,"/PCA-JackStrawPlot_40_",sam.name,".pdf"),width = 12,height = 10)
+JackStrawPlot(object = Mesenchymal_cell_data, dims = 1:40)
+dev.off()
+
+pdf(paste0("./",sam.name,"/PCA-ElbowPlot_",sam.name,".pdf"),width = 6,height = 5)
+ElbowPlot(Mesenchymal_cell_data,ndims = 40)
+dev.off()
+
+dim.use = 1:16
+# 运行 t-SNE 或 UMAP 降维
+Mesenchymal_cell_data <- RunTSNE(Mesenchymal_cell_data, dims = dim.use)
+# 或者
+Mesenchymal_cell_data <- RunUMAP(Mesenchymal_cell_data, dims = dim.use)
+
+
+res = 0.4
+# 寻找聚类
+Mesenchymal_cell_data <- FindNeighbors(Mesenchymal_cell_data, dims = dim.use)
+Mesenchymal_cell_data <- FindClusters(Mesenchymal_cell_data, resolution = res)
+
+
+# 创建你的图形，注意需要将它们保存为变量
+p1 <- TSNEPlot(Mesenchymal_cell_data, label = T)
+p2 <- TSNEPlot(Mesenchymal_cell_data, split.by = "group", label = T)
+p3 <- UMAPPlot(Mesenchymal_cell_data, label = T)
+p4 <- UMAPPlot(Mesenchymal_cell_data, split.by = "group", label = T)
+# 使用plot_grid将四个图形组合在一起
+combined_plot <- plot_grid(p1, p2, p3, p4, ncol = 2)
+# 将组合后的图形保存为PDF文件
+ggsave(filename = paste0("./",sam.name,"/",sam.name,"_Dimplot.pdf"), plot = combined_plot,width = 15,height = 8)
+
+
+
+#找差异基因
+Mesenchymal.cell<- FindAllMarkers(Mesenchymal_cell_data, only.pos = TRUE, 
+                              min.pct = 0.3, logfc.threshold = 0.25)
+write.table(Mesenchymal.cell,
+            file=paste0("./",sam.name,"/",sam.name,"_total_marker_genes_tsne_",as.character(res),"_",max(dim.use),"PC.txt"),
+            sep="\t",quote = F,row.names = F)
+
+
+# 计算每个实验组在每个 cluster 中的细胞数量
+cell_counts <- table(Mesenchymal_cell_data@meta.data$group, Mesenchymal_cell_data@meta.data$seurat_clusters)
+
+# 将数据转换为 data frame 并为列命名
+cell_counts_df <- as.data.frame.table(cell_counts)
+names(cell_counts_df) <- c("group", "cluster", "cell_count")
+
+# 计算每个 cluster 在每个 group 中的百分比
+cell_counts_df$percentage <- ave(cell_counts_df$cell_count, cell_counts_df$group, FUN = function(x) x / sum(x) * 100)
+
+# 对比两组中每个 cluster 的百分比
+pdf(paste0("./",sam.name,"/","resoluton=",res,"_",sam.name,"_cluster_percentage.pdf"))
+ggplot(cell_counts_df, aes(x = cluster, y = percentage, fill = group)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  theme_minimal() +
+  xlab("Cluster") +
+  ylab("Percentage of cells (%)") +
+  ggtitle(paste0("Percentage of cells in each cluster for ",sam.name)) +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+dev.off()
+
+saveRDS(Mesenchymal_cell_data,paste0("./",sam.name,"/data/",sam.name,"_data.rds"))
+saveRDS(cell_counts_df,paste0("./",sam.name,"/data/",sam.name,"_count_df.rds"))
+write.xlsx(cell_counts_df,paste0("./",sam.name,"/",sam.name,"_count_df.xlsx"))
+```
+##亚群分析
+```{r}
+
+
+
+for(clu_num in 1:14){
+  
+  cluster <- paste0("cluster",as.character(clu_num))
+  dir.create(paste0("./",sam.name,"/subset/",cluster))
+  
+#需要修改
+  df <- Mesenchymal_cell_data@meta.data[c("group", "seurat_clusters")]
+  df$is_cluster <- df$seurat_clusters == clu_num
+  contingency_table <- table(df$group, df$is_cluster)
+  chisq_test <- chisq.test(contingency_table)
+  
+  observed <- chisq_test$observed
+  expected <- chisq_test$expected
+  residuals <- (observed - expected) / sqrt(expected)
+  
+  significant_residuals <- which(abs(residuals) > 2, arr.ind = TRUE)
+  
+    # 创建并写入卡方检验和残差分析的结果
+  result_filename <- paste0("./",sam.name,"/subset/",cluster,"/cluster_test_result.xlsx")
+  df_to_write <- data.frame(
+    "Chi-square test result" = toString(chisq_test),
+    "Standardized residuals" = toString(residuals),
+    "Significant residuals (row and column indices)" = toString(significant_residuals)
+  )
+  write.xlsx(df_to_write, result_filename)
+
+  
+  # 以下是你原有的代码，我假设它们在这个循环中应该保持不变
+  # 取出你感兴趣的群体
+#需要修改
+  cluster_data <- subset(Mesenchymal_cell_data, subset = seurat_clusters == clu_num & group %in% c("Control","24h", "48h"))
+  cluster_data <- subset(cluster_data, subset = nFeature_RNA > 200)
+  cluster_data <- cluster_data[ , cluster_data$nCount_RNA > 0]
+  
+  # 将数据转换为DESeqDataSet
+  dds <- DESeqDataSetFromMatrix(countData = cluster_data@assays$RNA@counts + 1,
+                              colData = cluster_data@meta.data,
+                              design = ~ group)
+  dds$group <- relevel(dds$group, ref = "Control")
+  # 进行差异表达分析
+  dds <- DESeq(dds)
+
+  # 获取差异表达的结果
+  res <- results(dds)
+  res_df <- as.data.frame(res)
+  write.xlsx(res_df,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG.xlsx"),rowNames = T)
+  saveRDS(res,paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_deg_data.rds"))
+
+
+
+
+  #   选择显著差异表达的基因
+  sig_genes <- rownames(res)[res$pvalue < 0.05 & (abs(res$log2FoldChange) > 1)]
+  sig_genes <- sig_genes[!is.na(sig_genes)]
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_total_",as.character(length(sig_genes)),".txt"))
+  
+  res.Control.vs.24h <- results(dds, contrast = c("group", "24h", "Control"))
+  res.Control.vs.48h <- results(dds, contrast = c("group", "48h", "Control"))
+  res.24h.vs.48h <- results(dds, contrast = c("group", "48h", "24h"))
+  
+  sig_genes.Control.vs.24h <- rownames(res.Control.vs.24h)[which(res.Control.vs.24h$pvalue < 0.05 & abs(res.Control.vs.24h$log2FoldChange) > 1)]
+  sig_genes.Control.vs.48h <- rownames(res.Control.vs.48h)[which(res.Control.vs.48h$pvalue < 0.05 & abs(res.Control.vs.48h$log2FoldChange) > 1)]
+  sig_genes.24h.vs.48h <- rownames(res.24h.vs.48h)[which(res.24h.vs.48h$pvalue < 0.05 & abs(res.24h.vs.48h$log2FoldChange) > 1)]
+  sig_genes.Control.vs.24h.48h <- union(sig_genes.Control.vs.24h, sig_genes.Control.vs.48h)
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_con_",as.character(length(sig_genes.Control.vs.24h.48h)),".txt"))
+  file.create(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_24h_",as.character(length(sig_genes.24h.vs.48h)),".txt"))
+
+  
+  mart <- readRDS("./mart.rds")
+  #开始算control vs 24 48
+  gene_result_con_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.Control.vs.24h.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_control <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control <- data.frame(ego_ALL_control)
+  ego_all_control <- ego_all_control[order(ego_all_control$p.adjust),]
+  ego_all_control <- ego_all_control %>%
+    arrange(desc(Count))
+  ego_all_control_top30 <- ego_all_control[1 : 30,]
+  p_con <- ggplot(data=ego_all_control_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  #开始计算
+  gene_result_24_vs <- getBM(attributes = c('mgi_symbol',"entrezgene_id"), 
+                 filters = 'mgi_symbol', 
+                 values = sig_genes.24h.vs.48h, 
+                 mart = mart)
+  # BP, CC和MF三种通路都一起富集
+  ego_ALL_24h <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "ALL",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h <- data.frame(ego_ALL_24h)
+  write.csv(ego_all_24h,paste0("./",sam.name,"/subset/",cluster,"/enrichGO_all_24h.csv"))
+  
+  ego_all_24h <- ego_all_24h[order(ego_all_24h$p.adjust),]
+  ego_all_24h <- ego_all_24h %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h[1 : 30,]
+
+  p_24h <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.8,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con,p_24h)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_allont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+
+  # BP富集
+  ego_ALL_control_BP <- enrichGO(gene = na.omit(gene_result_con_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  ego_all_control_bp <- data.frame(ego_ALL_control_BP)
+  ego_all_control_bp <- ego_all_control_bp[order(ego_all_control_bp$p.adjust),]
+  ego_all_control_bp <- ego_all_control_bp %>%
+    arrange(desc(Count))
+  ego_all_control_bp_top30 <- ego_all_control_bp[1 : 30,]
+  p_con_bp <- ggplot(data=ego_all_control_bp_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#006b7b') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  
+  
+  ego_ALL_24h_BP <- enrichGO(gene    = na.omit(gene_result_24_vs$entrezgene_id),
+                    #universe     = row.names(dge.celltype),
+                    OrgDb         = org.Mm.eg.db,
+                    keyType       = 'ENTREZID',
+                    ont           = "BP",  #设置为ALL时BP, CC, MF都计算
+                    pAdjustMethod = "BH",
+                    readable = T)
+  
+  
+  
+  ego_all_24h_bp <- data.frame(ego_ALL_24h_BP)
+  ego_all_24h_bp <- ego_all_24h_bp[order(ego_all_24h$p.adjust),]
+  ego_all_24h_bp <- ego_all_24h_bp %>%
+    arrange(desc(Count))  
+  ego_all_24h_top30 <- ego_all_24h_bp[1 : 30,]
+
+  p_24h_bp <- ggplot(data=ego_all_24h_top30, aes(x=Description,y=Count)) + 
+    geom_bar(stat="identity", width=0.6,fill='#ffbc14') + 
+    coord_flip() +  xlab("GO term") + ylab("Num of Genes") + 
+    theme_bw()
+  p_combined <- plot_grid(p_con_bp,p_24h_bp)
+  ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_enrichGO_bp_ont.pdf"),
+         plot = p_combined,
+         width = 30,height = 16)
+
+  #kegg
+  clu_kegg_con <- enrichKEGG(gene = na.omit(gene_result_con_vs$entrezgene_id), 
+                         organism = 'mmu')
+  clu_kegg_24h <- enrichKEGG(gene = na.omit(gene_result_24_vs$entrezgene_id), 
+                         organism = 'mmu')
+  
+  try(p_con1 <- barplot(clu_kegg_con, showCategory=12),silent = T)
+  try(p_con2 <- dotplot(clu_kegg_con, showCategory=12),silent = T)
+  plotc_1 = p_con1/p_con2
+  
+  try(p_con3 <- barplot(clu_kegg_24h, showCategory=12),silent = T)
+  try(p_con4 <- dotplot(clu_kegg_24h, showCategory=12),silent = T)
+  plotc_2 = p_con3/p_con4 
+  
+  try(p_combined_kegg <- plot_grid(plotc_1,plotc_2),silent = T)
+  
+  try(ggsave(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"enrich_KEGG.pdf"), plot = p_combined_kegg, width = 36, height = 30),silent = T)
+
+  
+  
+  #############################
+  
+  # 第一张图: 三个组别用sig_genes.Control.vs.24h.48h基因来做热图
+
+  exprs_data_1 <- cluster_data[["RNA"]]@data[sig_genes.Control.vs.24h.48h, ]
+
+  # 标准化数据
+  exprs_data_1 <- t(scale(t(exprs_data_1)))
+
+  # 添加分组信息
+  ha_1 = HeatmapAnnotation(df = data.frame(group = cluster_data@meta.data$group),
+                       col = list(group = c("Control" = "#00b0eb", "24h" = "#ffd401", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_1 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data@meta.data$group)))))
+
+  # 绘制热图
+  col_fun = circlize::colorRamp2(c(-2, 0, 2), c("blue", "white", "red"))
+  heatmap_1 = Heatmap(exprs_data_1, 
+                  name = "expression", 
+                  top_annotation = ha_1, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_1)
+
+
+
+# 第二张图: 24h组和48h组用sig_genes.24h.vs.48h基因来做热图
+
+  cluster_data_2 <- subset(cluster_data, subset = group %in% c("24h", "48h"))
+
+  exprs_data_2 <- cluster_data_2[["RNA"]]@data[sig_genes.24h.vs.48h, ]
+
+  # 标准化数据
+  exprs_data_2 <- t(scale(t(exprs_data_2)))
+
+  # 添加分组信息
+  ha_2 = HeatmapAnnotation(df = data.frame(group = cluster_data_2@meta.data$group),
+                       col = list(group = c("24h" = "#3f60aa", "48h" = "#e20612")),
+                       show_annotation_name = TRUE)
+
+  # 将分组信息作为一个因子，用于列聚类
+  cluster_cols_2 = as.dendrogram(hclust(dist(as.numeric(factor(cluster_data_2@meta.data$group)))))
+
+  # 绘制热图
+  heatmap_2 = Heatmap(exprs_data_2, 
+                  name = "expression", 
+                  top_annotation = ha_2, 
+                  show_row_names = TRUE, 
+                  show_column_names = FALSE, 
+                  clustering_method_rows = "complete", 
+                  clustering_distance_rows = "euclidean",
+                  clustering_method_columns = "complete",
+                  clustering_distance_columns = "euclidean",
+                  cluster_columns = cluster_cols_2)
+
+
+
+  
+  pdf(paste0("./",sam.name,"/subset/",cluster,"/",cluster,"_DEG_heatmap.pdf"), width = 20, height = 15)
+  layout(matrix(1:2,2,1))
+  draw(heatmap_1, heatmap_legend_side = "bot")
+  draw(heatmap_2, heatmap_legend_side = "bot")
+  dev.off()
+}
+
+
+
+
+```
+
+##亚群定义
+```{r}
+
+Mesenchymal_cell_data <- readRDS("./Mesenchymal_cell/data/Mesenchymal_cell_data.rds")
+
+
+FeaturePlot(Mesenchymal_cell_data)
+
+nos2 <- readRDS("./ns2_data.rds")
+
+FeaturePlot(Mesenchymal_cell_data,features = c("Eln","Ecm1","Ereg"),label = T)
+FeaturePlot(Mesenchymal_cell_data,features = c("Edil3"),label = T,split.by = "group")
+
+
+
+UMAPPlot(nos2,label = T)
+
+nos2.marker <- readRDS("./")
+
+
+marker.4.5 <- FindMarkers(Mesenchymal_cell_data,ident.1 =  "4",ident.2 = "5")
+```
+
+```{r}
+# 获取 Mesenchymal_data 中 seurat_clusters == 6 的细胞名
+cells_to_remove <- colnames(Mesenchymal_cell)[Mesenchymal_cell$seurat_clusters == 6]
+
+# 从原始数据集 nos2 中排除这些细胞
+nos2_filtered <- subset(nos2, cells = setdiff(colnames(nos2), cells_to_remove))
+
+#去除掉nos2中Mesenchymal的cluster6以后观察cellchat中的信号强度变化
+nos2_filtered@meta.data$seurat_clusters <- as.numeric(nos2_filtered@meta.data$seurat_clusters) + 1
+
+nos2.con <- subset(nos2_filtered,subset = group == "Control")
+nos2.24h <- subset(nos2_filtered,subset = group == "24h")
+nos2.48h <- subset(nos2_filtered,subset = group == "48h")
+
+runCellChat <- function(nos2) {
+    cellchat <- createCellChat(nos2, group.by = "cell_type", meta = nos2@meta.data)
+    CellChatDB <- CellChatDB.mouse
+    cellchat@DB <- CellChatDB
+    cellchat <- subsetData(cellchat)
+    cellchat <- identifyOverExpressedGenes(cellchat)
+    cellchat <- identifyOverExpressedInteractions(cellchat)
+    cellchat <- computeCommunProb(cellchat)
+    cellchat <- filterCommunication(cellchat, min.cells = 10)
+    cellchat <- computeCommunProbPathway(cellchat)
+    cellchat <- aggregateNet(cellchat)
+    return(cellchat)
+}
+
+cellchat.con <- runCellChat(nos2.con)
+cellchat.24h <- runCellChat(nos2.24h)
+cellchat.48h <- runCellChat(nos2.48h)
+
+object.list <- list(group1 = cellchat.con, group2 = cellchat.24h, group3 = cellchat.48h)
+
+object.list = lapply(object.list, function(x){
+  x = netAnalysis_computeCentrality(x)
+})
+
+cellchat <- mergeCellChat(object.list, add.names = names(object.list), cell.prefix = TRUE)
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T,comparison = c(1,2))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(1,2))
+
+#发现同样的Mesenchymal cell是细胞间通讯的主角
+par(mfrow = c(1,3), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(1,2))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(2,3))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(1,3))
+dev.copy(pdf,"./Mesenchymal_cell/figure/cellular_communication_out_of_Mesenchymal_cell_cluster6.pdf")
+dev.off()
+```
+
+```{r}
+#0 1 2 6 7 是fibroblast
+#3 4 5 是SMC
+Mesenchymal <- readRDS("./Mesenchymal_cell/data/Mesenchymal_cell_data.rds")
+
+me_name <- as.character(c(0:7))
+
+Mesenchymal_sub <- subset(Mesenchymal,subset = seurat_clusters %in% me_name)
+
+sam.name <- "Mesenchymal_cell/Mesen_sub"
+
+Mesenchymal_sub <- my_sc_flow(Mesenchymal_sub,sam.name,"Mesen_sub")
+Mesenchymal_sub <- readRDS("./Mesenchymal_cell/Mesen_sub/data/Mesen_sub_data.rds")
+
+
+DimPlot(Mesenchymal_sub,label = T)
+
+
+fibroblast <- subset(Mesenchymal_sub,subset = seurat_clusters %in% c("0","1","2","6","7"))
+
+smc <- subset(Mesenchymal_sub,subset = seurat_clusters %in% c("4","5"))
+
+DimPlot(fibroblast,label = T)
+
+
+#CTF
+VlnPlot(fibroblast,c("Pdgfra","Tnc","Foxl1","Sox6","Procr","Bmp2","Wnt5a","Nrg1"
+                     ),
+        stack = T,flip = T)
+
+#cCF1
+VlnPlot(fibroblast,c("Pdgfra",
+                     "Cd34","Thy1","Col15a1","Wnt2","Wnt2b","Sfrp1","Frzb"
+                     ),
+        stack = T,flip = T)
+
+#cCF2
+VlnPlot(fibroblast,c("Pdgfra",
+                     "Cd34","Thy1",
+                     "Cd81","Cd55","Pi16","Grem1","Rspo3","Igf1","Vegfd"),
+        stack = T,flip = T)
+
+#1 6 相近
+#0 2 相近
+DimPlot(fibroblast,label = T)
+
+TSNEPlot(Mesenchymal_sub)
+
+
+```
+
+
+```{r}
+
+VlnPlot(smc,c("Acta2",
+              "Actg2",
+              "Cspg4",
+              "Ppp1r12b",
+              "Olfr78",
+              "Rgs2","Actc1","Cpxm2","Lamb1","F2r","Tnfrsf19",
+              "Des","Abcc9"),
+        stack = T,flip = T)
+
+
+smcmarker <- FindAllMarkers(smc)
+
+write.xlsx(smc.marker,"./Mesenchymal_cell/data/smc_marker.xlsx")
+
+
+
+#myofibroblast，不表达平滑肌的Des，表达fibroblast的Acta2和Vim
+VlnPlot(Mesenchymal_sub,c("Des","Vim","Acta2"),
+        stack = T,flip = T)
+
+
+#cCF1和cCF2的相关表达
+Mesenchymal_sub <- SetIdent(Mesenchymal_sub,value = "cell_name")
+VlnPlot(Mesenchymal_sub,c("Col15a1","Cd81","Cd55","Pi16","Sfrp1"),
+        stack = T,flip = T)
+
+
+TSNEPlot(Mesenchymal_sub,label = T)
+```
+
+```{r}
+#平滑肌细胞分类
+VlnPlot(smc,c("Rgs2","Actc1","Cpxm2","Lamb1","F2r","Tnfrsf19",#cluster5 是Intestinal SMC
+              "Des","Grem2","Shisa3","Foxp2","Abcc9","Lamb2"),#Visceral SMC
+        flip = T,stack = T)
+
+
+VlnPlot(smc,c(#cluster5 是Intestinal SMC
+              "Des","Grem2","Shisa3","Foxp2","Abcc9","Lamb2"),#Visceral SMC
+        flip = T,stack = T)
+```
+
+
+
+```{r}
+
+nos2 <- readRDS("./ns2_data.rds")
+
+Mesenchymal_sub@meta.data$seurat_clusters <- as.character(Mesenchymal_sub@meta.data$seurat_clusters)
+
+View(Mesenchymal_sub@meta.data)
+
+#定义细胞
+Mesenchymal_cell_name <- c("Fibroblast","Fibroblast","Fibroblast","myofibroblast","SMC","SMC","Fibroblast","Fibroblast")
+Mesenchymal_sub@meta.data$cell_name <- Mesenchymal_cell_name[as.numeric(Mesenchymal_sub@meta.data$seurat_clusters) + 1]
+table(Mesenchymal_sub@meta.data$cell_name)
+
+glia <- subset(nos2,subset = cell_type == "ENS glia")
+
+glia@meta.data <- glia@meta.data %>%
+  mutate(cell_name = "ENS glia")
+View(glia@meta.data)
+
+mesen_glia  <- merge(Mesenchymal_sub,y = glia)
+mesen_glia@meta.data <- mesen_glia@meta.data %>%
+  select(-9)
+
+View(mesen_glia@meta.data)
+table(mesen_glia@meta.data$cell_name)
+
+#去除掉nos2中Mesenchymal的cluster6以后观察cellchat中的信号强度变化
+mesen_glia@meta.data$seurat_clusters <- as.numeric(mesen_glia@meta.data$seurat_clusters) + 1
+
+nos2.con <- subset(mesen_glia,subset = group == "Control")
+nos2.24h <- subset(mesen_glia,subset = group == "24h")
+nos2.48h <- subset(mesen_glia,subset = group == "48h")
+
+runCellChat <- function(nos2) {
+    cellchat <- createCellChat(nos2, group.by = "cell_name", meta = nos2@meta.data)
+    CellChatDB <- CellChatDB.mouse
+    cellchat@DB <- CellChatDB
+    cellchat <- subsetData(cellchat)
+    cellchat <- identifyOverExpressedGenes(cellchat)
+    cellchat <- identifyOverExpressedInteractions(cellchat)
+    cellchat <- computeCommunProb(cellchat)
+    cellchat <- filterCommunication(cellchat, min.cells = 10)
+    cellchat <- computeCommunProbPathway(cellchat)
+    cellchat <- aggregateNet(cellchat)
+    return(cellchat)
+}
+
+cellchat.con <- runCellChat(nos2.con)
+cellchat.24h <- runCellChat(nos2.24h)
+cellchat.48h <- runCellChat(nos2.48h)
+
+object.list <- list(group1 = cellchat.con, group2 = cellchat.24h, group3 = cellchat.48h)
+
+object.list = lapply(object.list, function(x){
+  x = netAnalysis_computeCentrality(x)
+})
+
+cellchat <- mergeCellChat(object.list, add.names = names(object.list), cell.prefix = TRUE)
+
+saveRDS(object.list,"./Mesenchymal_cell/data/Mesen_glia_object.list.rds")
+saveRDS(cellchat,"./Mesenchymal_cell/data/Mesen_glia_cellchat.rds")
+
+par(mfrow = c(1,2), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T,comparison = c(1,2))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(1,2))
+
+#发现同样的Mesenchymal cell是细胞间通讯的主角
+par(mfrow = c(1,3), xpd=TRUE)
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(1,2))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(2,3))
+netVisual_diffInteraction(cellchat, weight.scale = T, measure = "weight",comparison = c(1,3))
+dev.copy(pdf,"./Mesenchymal_cell/figure/cellular_communication_out_of_Mesenchymal_cell_cluster6.pdf")
+dev.off()
+```
+
+##smc
+```{r}
+smc <- readRDS("./smc/data/smc_data.rds")
+
+
+#arterial SMC 1/2/3/6
+VlnPlot(smc,c("Nrip2","Pln","Rgs4"),
+        stack = T,flip = T)
+#interstitial SMC 0 5
+VlnPlot(smc,c("Tmem119","Hhip","Tgfb1i1","Postn","Cpxm2","Ckb"),
+        stack = T,flip = T)
+#Visceral SMC 4
+VlnPlot(smc,c("Vtn","Grem2","Cpe","Cnn1","Actg2","Shisa3"),
+        stack = T,flip = T)
+
+smc@meta.data <- smc@meta.data %>%
+  mutate(cell_name = case_when(seurat_clusters %in% c(1,2,3,6) ~ "arterial SMC",
+                               seurat_clusters %in% c(0,5) ~ "interstitial SMC",
+                               T ~ "visceral SMC"))
+
+View(Mesenchymal_sub@meta.data)
+table(Mesenchymal_sub@meta.data$cell_name)
+Mesenchymal_sub@meta.data <- Mesenchymal_sub@meta.data %>%
+  mutate(cell_name = case_when(
+    seurat_clusters %in% c(0,2) ~ "cCF1",
+    seurat_clusters %in% c(1,6) ~ "cCF2",
+    seurat_clusters == 7 ~ "CTF",
+    seurat_clusters == 3 ~ "myofibroblast",
+    T ~ "smc"
+  ))
+
+TSNEPlot(Mesenchymal_sub,label = T,group.by = "cell_name")
+
+# For the smc data:
+smc_df <- data.frame(
+  barcode = rownames(smc@meta.data),
+  smc_cell_name = smc@meta.data$cell_name
+)
+
+# For the Mesenchymal_sub data:
+mesenchymal_df <- data.frame(
+  barcode = rownames(Mesenchymal_sub@meta.data),
+  mesenchymal_cell_name = Mesenchymal_sub@meta.data$cell_name
+)
+merged_df <- left_join(mesenchymal_df, smc_df, by = "barcode")
+
+merged_df <- merged_df %>%
+  mutate(final_cell_name = if_else(mesenchymal_cell_name == "smc", smc_cell_name, mesenchymal_cell_name))
+
+# Replace the cell_name in Mesenchymal_sub
+Mesenchymal_sub@meta.data$cell_name <- merged_df$final_cell_name[match(rownames(Mesenchymal_sub@meta.data), merged_df$barcode)]
+
+saveRDS(Mesenchymal_sub,"./Mesenchymal_cell/data/Mesenchymal_sub_data.rds")
+```
+
+
+
+
+#其他小细胞类
+##Enteric glia
+```{r}
+nos2 <- readRDS("./ns2_data.rds")
+
+glia <- subset(nos2,subset = seurat_clusters == "26")
+```
+
+```{r}
+endo <- subset(nos2,subset = seurat_clusters == "21")
+```
+
+```{r}
+ILC2 <- readRDS("./T_cell/data/ILC2.rds")
+```
+
+```{r}
+combined_1 <- merge(glia,y = endo)
+combined_2 <- merge(combined_1,y = ILC2)
+
+combined_2@meta.data <- combined_2@meta.data %>%
+  mutate(cell_type = ifelse(cell_type == "T cell","ILC2",cell_type)) %>%
+  mutate(cell_name = cell_type)
+
+table(combined_2@meta.data$cell_name)
+
+saveRDS(combined_2,"glia_endo_ILC2.rds")
+```
+
+```{r}
+small_group <- readRDS("./glia_endo_ILC2.rds")
+
+Enterocyte_data <- readRDS("./all_enterocyte/data/enterocyte_all.rds")
+
+T_cell_data <- readRDS("./T_cell/data/T_cell_sub_pathway_calculated.rds")
+
+T_small <- merge(T_cell_data,y = small_group)
+```
+
+
+#提取RNA velocity需要的降维信息
+```{r}
+Mesenchymal_cell_data <- readRDS("./Mesenchymal_cell/data/Mesenchymal_cell_data.rds")
+B_cell <- readRDS("./B_cell/data/B_cell_data.rds")
+T_cell <- readRDS("./T_cell/data/T_cell_data.rds")
+Macrophage_data <- readRDS("./Macrophage/data/Macrophage_data.rds")
+Enterocyte_data <- readRDS("./Enterocyte/data/Enterocyte_data.rds")
+
+
+
+
+# 将所有对象的名称放入列表中
+data_list <- c("Mesenchymal_cell_data", "B_cell", "T_cell", "Macrophage_data", "Enterocyte_data")
+
+# 迭代这个列表
+for (data_name in data_list) {
+  # 使用 get() 函数来获取实际的对象
+  seurat.obj <- get(data_name)
+  
+  # 执行你的代码
+  umap.data<-seurat.obj@reductions$umap@cell.embeddings
+  umap.data<-cbind(rownames(umap.data),umap.data)
+  colnames(umap.data)[1]<-"Barcode"
+  write.table(umap.data,file=paste0("./RNA_velocity/dim_data/",data_name,'_UMAP.csv'),row.names=F,col.names=T,sep=',',quote=F)
+  
+  tsne.data<-seurat.obj@reductions$tsne@cell.embeddings
+  tsne.data<-cbind(rownames(tsne.data),tsne.data)
+  colnames(tsne.data)[1]<-"Barcode"
+  write.table(tsne.data,file=paste0("./RNA_velocity/dim_data/",data_name,'_tSNE.csv'),row.names=F,col.names=T,sep=',',quote=F)
+}
+
+for (data_name in data_list) {
+  # 使用 get() 函数来获取实际的对象
+  seurat.obj <- get(data_name)
+  
+  # 执行你的代码
+  cluster.data <- data.frame("Barcode"=rownames(seurat.obj@meta.data),"Cluster"=seurat.obj@meta.data$seurat_clusters)
+  write.csv(cluster.data,file=paste0("./RNA_velocity/cluster_data/",data_name,'_cluster.csv'),row.names=F,quote=F)
+}
+
+
+```
+
+
+
+
+
+
+#转录组信息
+```{r}
+data <-readRDS("./all_enterocyte/data/enterocyte_all.rds")
+
+cell_type <- "enterocyte"
+
+a <- "24h_vs_Control"
+b <- "48h_vs_24h"
+c <- "48h_vs_Control"
+
+data <- SetIdent(data,value = "group")
+
+res_a <- FindMarkers(data,ident.1 = "24h",ident.2 = "Control")
+res_b <- FindMarkers(data,ident.1 = "48h",ident.2 = "24h")
+res_c <- FindMarkers(data,ident.1 = "48h",ident.2 = "Control")
+
+for(i in c(res_a,res_b,res_c)){
+  res_data <- i
+  
+}
+
+
+
+```
+
+```{r}
+use_data <- readRDS("./Mesenchymal_cell/data/Mesenchymal_sub_data.rds")
+
+use_data <- SetIdent(use_data,value = "group")
+
+table(use_data@meta.data$cell_name)
+
+table(use_data@meta.data$cell_type)
+
+use_data@meta.data$cell_type <- use_data@meta.data$cell_name
+
+use_data <- subset(use_data,subset = cell_type %in% c("cCF1","cCF2","CTF","myofibroblast"))
+```
+
+
+```{r}
+library(Seurat)
+library(clusterProfiler)
+library(org.Mm.eg.db)
+library(biomaRt)
+library(openxlsx)
+```
+
+```{r}
+
+
+# 设定输出目录
+output_dir <- "./group_compared/"
+
+# 为每一组差异分析定义对比条件
+comparisons <- list(
+  "24h_vs_Control" = c("24h", "Control"),
+  "48h_vs_24h" = c("48h", "24h"),
+  "48h_vs_Control" = c("48h", "Control")
+)
+
+# 对每一个细胞类型进行分析
+unique_cell_types <- unique(use_data@meta.data$cell_type)
+mart <- readRDS("./mart.rds")
+
+# 定义一个函数用于富集分析和保存结果
+perform_enrichment_and_save <- function(genes, save_path_prefix, file_suffix, enrichment_type) {
+  gene_trans <- getBM(attributes = c('mgi_symbol', "entrezgene_id"), 
+                      filters = 'mgi_symbol', 
+                      values = genes, 
+                      mart = mart)
+  
+  if (enrichment_type == "GO") {
+    result <- enrichGO(gene = na.omit(gene_trans$entrezgene_id),
+                       OrgDb = org.Mm.eg.db,
+                       keyType = 'ENTREZID',
+                       ont = "ALL",
+                       pAdjustMethod = "BH",
+                       readable = TRUE)
+  } else {
+    result <- enrichKEGG(gene = na.omit(gene_trans$entrezgene_id), 
+                         organism = 'mmu')
+  }
+  
+  write.xlsx(as.data.frame(result), paste0(save_path_prefix, "/", enrichment_type, "/", prefix, "_", file_suffix, "_", enrichment_type, "_enrichment.xlsx"))
+}
+
+for(cell_type in unique_cell_types) {
+  subset_obj <- subset(use_data, subset = cell_type == cell_type)
+  
+  for(compare_name in names(comparisons)) {
+    comparison <- comparisons[[compare_name]]
+    
+    # 使用Seurat进行差异基因分析
+    markers <- FindMarkers(subset_obj, ident.1 = comparison[1], ident.2 = comparison[2])
+    markers$gene <- rownames(markers)
+    all_diff <- markers[abs(markers$avg_log2FC) > log2(1.2) & markers$p_val_adj <= 0.05 |
+                        markers$avg_log2FC < log2(0.75) & markers$p_val_adj <= 0.05, ]
+    upregulated <- markers[markers$avg_log2FC > log2(1.2) & markers$p_val_adj <= 0.05, ]
+    downregulated <- markers[markers$avg_log2FC < log2(0.75) & markers$p_val_adj <= 0.05, ]
+    
+    # 存储结果
+    save_path <- paste0(output_dir, compare_name)
+    prefix <- paste(cell_type, compare_name, sep = "_")
+
+    # 分别保存四个数据框为Excel文件
+    write.xlsx(markers, paste0(save_path, "/", prefix, "_RawMarkers.xlsx"))
+    write.xlsx(all_diff, paste0(save_path, "/", prefix, "_AllDiff.xlsx"))
+    write.xlsx(upregulated, paste0(save_path, "/", prefix, "_Upregulated.xlsx"))
+    write.xlsx(downregulated, paste0(save_path, "/", prefix, "_Downregulated.xlsx"))
+    
+    # 对4个数据框执行GO和KEGG的富集分析，并保存结果
+    for(enrichment_type in c("GO", "KEGG")) {
+      perform_enrichment_and_save(row.names(markers), save_path, "raw_markers", enrichment_type)
+      perform_enrichment_and_save(row.names(all_diff), save_path, "all_diff", enrichment_type)
+      perform_enrichment_and_save(row.names(upregulated), save_path, "upregulated", enrichment_type)
+      try(perform_enrichment_and_save(row.names(downregulated), save_path, "downregulated", enrichment_type))
+    }
+  }
+}
+
+```
+
+
+```{r}
+data1 <- readRDS("./ns2_data.rds")
+
+```
+
+
+
+#验证 m6a
+```{r}
+library(tidyverse)
+ver_data <- data.table::fread("../其他单细胞验证/GSE171422_filtered_gene_count_matrix.txt")
+ver_data <- as.data.frame(ver_data)
+rownames(ver_data) <- ver_data[,1]
+ver_data <- ver_data[,-1]
+
+data <- ver_data
+
+ver_data <- CreateSeuratObject(
+  data,
+  min.cells = 10,
+  min.features = 200,
+  names.field = 3,
+  names.delim = ".")
+
+View(ver_data@meta.data)
+
+group <- gsub(".*\\.(.*)$", "\\1", rownames(ver_data@meta.data))
+
+ver_data$group <- group
+
+saveRDS(ver_data,"./verify_single_cell/data/raw_verify_data.rds")
+```
+
+
+```{r}
+experiment.aggregate <- ver_data
+
+experiment.aggregate <- ScaleData(experiment.aggregate)
+
+experiment.aggregate <- FindVariableFeatures(experiment.aggregate)
+
+experiment.aggregate <- RunPCA(object = experiment.aggregate)
+
+DimHeatmap(experiment.aggregate, dims = 1:15, cells = 500, balanced = TRUE)
+
+experiment.aggregate <- my_sc_flow(experiment.aggregate,sam.name = "verify_single_cell",file_head = "verify",
+                                   dim.set = 15,res.set = 0.6)
+```
+
+
+```{r}
+VlnPlot(experiment.aggregate,c("Alpi","Wfdc2","Muc2","Fgfbp1","Slc6a14","Lgr5","Tmigd1","Sytl2"),
+        stack = T,flip = T)
+
+FeaturePlot(experiment.aggregate,c("Tmigd1"))
+
+ver_con <- subset(experiment.aggregate,subset = seurat_clusters %in% c(2,8,13))
+
+ver_goblet <- subset(experiment.aggregate,subset = seurat_clusters %in% c(1,4,5,6,9,12,16))
+```
+
+```{r}
+
+ver_con <- my_sc_flow(ver_con,sam.name = "verify_single_cell/ver_con","ver_con",dim.set = 15,res.set = 0.6)
+
+VlnPlot(ver_con,c("Tmigd1"))
+
+ver_goblet <- my_sc_flow(ver_goblet,sam.name = "verify_single_cell/ver_goblet","ver_goblet",dim.set = 15,res.set = 0.6)
+
+VlnPlot(ver_goblet,c("Sytl2","Mdx1","Mki67"),
+        flip = T,stack = T)
+```
+
+
+#验证 aging
+```{r}
+data1 <- data.table::fread("../其他单细胞验证/GSE168448_RAW/GSM5140515_Young-1-Cecum.csv.gz")
+data2 <- data.table::fread("../其他单细胞验证/GSE168448_RAW/GSM5140516_Young-2-Cecum.csv.gz")
+
+sum(rownames(data1) == rownames(data2))
+
+data <- readRDS("./all_enterocyte/data/enterocyte_all.rds")
+
+read_my_table <- function(my_file){
+  sc_data <- data.table::fread(my_file)
+  sc_data <- as.data.frame(sc_data)
+  rownames(sc_data) <- sc_data[,1]
+  sc_data <- sc_data[,-1]
+  return(sc_data)
+}
+
+
+
+files <- list.files(path = "../其他单细胞验证/GSE168448_RAW", full.names = TRUE)
+
+list_of_data <- lapply(files[1:15], read_my_table)
+
+merged_data <- do.call(cbind, list_of_data)
+
+
+ver_data <- CreateSeuratObject(
+  merged_data,
+  min.cells = 10,
+  min.features = 200)
+
+ver_data <- my_sc_flow(ver_data,sam.name = "verify_single_cell_aging",file_head = "aging",
+                                   dim.set = 15,res.set = 0.6)
+
+DimPlot(sub_data)
+
+VlnPlot(sub_data,c("Wfdc2","Fgfbp1","Maoa","Sult1b1","Muc2","Tff3","Lgr5","Mki67","Chga","Dclk1"),
+        stack = T,flip = T)
+```
+
+##结肠细胞
+```{r}
+ver_con <- subset(sub_data,subset = seurat_clusters %in% c(1,2,5,6,8,9,10,12))
+
+ver_con@meta.data$group <- "aging"
+
+ver_con <- my_sc_flow(ver_con,sam.name = "verify_single_cell_aging/con",file_head = "aging",
+                                   dim.set = 15,res.set = 0.6)
+
+tiff("./verify_single_cell_aging/figure/Tmigd1_vlnplot.tiff",units = "in",res = 300,height = 4,width = 5)
+VlnPlot(ver_con,c("Tmigd1"))+xlab("GSE168448")
+dev.off()
+
+FeaturePlot(ver_con,c("Tmigd1"))
+
+markers <- FindMarkers(ver_con,ident.1 = c(6,10,11,12,13))
+markers$gene <- rownames(markers)
+
+markers <- markers %>%
+  mutate(expre = )
+
+
+res_marker <- expr_and_go_kegg(markers)
+
+View(res_marker$up.go.result)
+
+saveRDS(res_marker,"./verify_single_cell_aging/data/Tmigd1+_vs_Tmidg1-_finamarker_and_enrich.rds")
+saveRDS(ver_con,"./verify_single_cell_aging/data/ver_con_Tmidg1_verify.rds")
+
+View(res_marker$up.go.result)
+
+
+View(res_marker$down.go.result)
+
+res_marker$up.go.result$Group <- "Tmigd1+"
+res_marker$down.go.result$Group <- "Tmidg1-"
+
+plot_data <- rbind(res_marker$up.go.result,res_marker$down.go.result)
+plot_data$GeneRatio <- as.numeric(as.character(plot_data$GeneRatio))
+
+p <- ggplot(plot_data, aes(x = Group, y = Description, size = Count, color = p.adjust)) +
+    geom_point(alpha = 0.6) +
+    theme_minimal() +
+    theme(axis.title.y = element_blank())+
+    theme(legend.position = "right")+
+    scale_color_gradient(high = "#af2934",low = "#2f4e87")+
+    scale_size_continuous(breaks = c(min(plot_data$Count), mean(plot_data$Count), max(plot_data$Count)))+
+    labs(x = "GSE168448")
+
+
+tiff("./verify_single_cell_aging/figure/Tmigd1_GO_enrich_dot_plot.tiff",units = "in",res = 300,height = 10,width = 6)
+print(p)
+dev.off()
+
+View(as.data.frame(res_marker$up.kegg.data))
+
+
+up.kegg <- as.data.frame(res_marker$up.kegg.data)
+down.kegg <- as.data.frame(res_marker$down.kegg.data)
+
+
+up.kegg.plot <- up.kegg %>%
+  filter(ID %in% c("mmu00190","mmu04520","mmu05100","mmu04666","mmu04670")) %>%
+  mutate(Group = "Tmigd1+")
+
+down.kegg.plot <- down.kegg %>%
+  filter(ID %in% c("mmu03030","mmu03040","mmu04141","mmu01230","mmu00480")) %>%
+  mutate(Group = "Tmigd1-")
+
+kegg.plot <- rbind(up.kegg.plot,down.kegg.plot)
+
+kegg.plot$Count[kegg.plot$Group == "Tmigd1-"] <- -kegg.plot$Count[kegg.plot$Group == "Tmigd1-"]
+
+kegg.plot <- kegg.plot %>%
+  arrange(desc(Count))
+
+
+p <- ggplot(kegg.plot, aes(x = reorder(Description, Count), y = Count, fill = Group)) +
+    geom_bar(stat = "identity") +
+    theme_minimal() +
+    coord_flip() +
+    theme(
+      axis.title.y = element_blank(),
+      axis.text.y = element_text(face = "bold")
+    ) +
+    labs(y = "GSE168448")+
+    scale_y_continuous(labels = function(x) abs(x)) +
+    scale_fill_manual(values = c("#2f4e87","#af2934"))
+  
+
+tiff("./verify_single_cell_aging/figure/Timgd1_kegg_enrich_barplot.tiff",units = "in",res = 300,width = 10,height = 5)
+print(p)
+dev.off()
+```
+
+##杯状细胞
+```{r}
+VlnPlot(sub_data,c("Wfdc2","Fgfbp1","Maoa","Sult1b1","Muc2","Tff3","Lgr5","Mki67","Chga","Dclk1"),
+        stack = T,flip = T)
+
+
+
+ver_goblet <- subset(sub_data,subset = seurat_clusters %in% c(2,11,13,15,17,20,14,19))
+
+ver_goblet@meta.data$group <- "aging"
+
+ver_goblet <- readRDS("./verify_single_cell_aging/goblet/data/goblet_data.rds")
+
+VlnPlot(ver_goblet,c("Sytl2","Mki67","Mxd1","Dmbt1"),
+        stack = T,flip = T)
+
+go_marker <- FindMarkers(ver_goblet,ident.1 = c(0,3,4))
+
+go_marker$gene <- rownames(go_marker)
+```
+
+
+
+#多组学
+##timeOmics
+```{r}
+library(timeOmics)
+library(tidyverse)
+library(lmms)
+library(openxlsx)
+```
+
+```{r}
+data("timeOmics.simdata")
+
+sim.data <- timeOmics.simdata$sim
+
+remove.low.cv <- function(X, cutoff = 0.5){
+  # var.coef
+  cv <- unlist(lapply(as.data.frame(X), 
+                      function(x) abs(sd(x)/mean(x))))
+  return(X[,cv > cutoff])
+}
+
+data.filtered <- remove.low.cv(sim.data, 0.5)
+
+#time是行名也就是样本名的时间点
+time <- timeOmics.simdata$time
+
+```
+
+###单细胞
+```{r}
+#我的数据
+colon <- readRDS("./all_enterocyte/data/enterocyte_all.rds")
+colon <- SetIdent(colon,value = "group")
+colon <- FindVariableFeatures(colon, nfeatures = 500) 
+colon_gene <- FindAllMarkers(colon)
+
+Mesenchymal_cell_data <- readRDS("./Mesenchymal_cell/data/Mesenchymal_sub_data.rds")
+
+Mesenchymal_cell_data <- SetIdent(Mesenchymal_cell_data,value = "group")
+mesen_gene  <- FindAllMarkers(Mesenchymal_cell_data)
+
+vari_gene <- unique(c(rownames(colon_gene),rownames(mesen_gene)))
+
+
+data <- merge(colon,y = Mesenchymal_cell_data)
+
+data <- subset(data,features = vari_gene)
+
+expression_matrix <- t(as.data.frame(data@assays$RNA@counts))
+
+
+View(data@meta.data)
+
+sum(rownames(expression_matrix) == rownames(data@meta.data))
+
+expression_matrix <-as.data.frame(expression_matrix)
+
+mean_expression_matrix <- expression_matrix %>%
+  mutate(sample_id = data@meta.data$orig.ident) %>%
+  group_by(sample_id) %>%
+  summarise_all(mean)
+
+tail(mean_expression_matrix)
+
+mean_expression_matrix  <- mean_expression_matrix %>%
+  column_to_rownames(var = "sample_id")
+
+sc_data <- mean_expression_matrix
+
+saveRDS(sc_data,"./multi_omics/data/colon_mesen_marker_of_group_dataframe.rds")
+```
+
+```{r}
+sc_data <- readRDS("./multi_omics/data/colon_mesen_marker_of_group_dataframe.rds")
+
+scale_data <- sc_data %>%
+  mutate(across(everything(), ~log2(.x + 1))) %>% # 对数变换
+  scale()  # 缩放
+
+remove.low.cv <- function(X, cutoff = 0.5){
+  # var.coef
+  cv <- unlist(lapply(as.data.frame(X), 
+                      function(x) abs(sd(x)/mean(x))))
+  return(X[,cv > cutoff])
+}
+
+data.filtered <- remove.low.cv(scale_data, 0.5)
+
+```
+
+
+```{r}
+time <- c(1,1,1,2,2,2,3,3)
+
+lmms.output <- lmms::lmmSpline(data = data.filtered, time = time,
+                         sampleID = rownames(data.filtered), deri = FALSE,
+                         basis = "p-spline", numCores = 4, timePredict = 1:3,
+                         keepModels = TRUE)
+modelled.data <- t(slot(lmms.output, 'predSpline'))
+
+# gather data
+data.gathered <- modelled.data %>% as.data.frame() %>% 
+  rownames_to_column("time") %>%
+  mutate(time = time) %>%
+  pivot_longer(names_to="feature", values_to = 'value', -time)
+
+# plot profiles
+data.gathered$time <- as.numeric(as.character(data.gathered$time))
+
+ggplot(data.gathered, aes(x = time, y = value, color = feature)) + geom_line() +
+  theme_bw() + ggtitle("`lmms` profiles") + ylab("Feature expression") +
+  xlab("Time")
+
+
+filter.res <- lmms.filter.lines(data = data.filtered, 
+                                lmms.obj = lmms.output, time = time)
+profile.filtered <- filter.res$filtered
+
+sc_profile.filtered <- profile.filtered
+
+```
+###合并函数
+```{r}
+#输入筛选前的标准化数据，返回timeOmics的输入数据
+
+plot_and_filter_lmms <- function(scale_data, time) {
+  # 确保输入数据的有效性
+  if (!is.data.frame(data.filtered)) {
+    stop("data.filtered must be a data frame")
+  }
+  
+  if (missing(time)) {
+    stop("time vector is required")
+  }
+  
+  remove.low.cv <- function(X, cutoff = 0.5){
+  # var.coef
+  cv <- unlist(lapply(as.data.frame(X), 
+                      function(x) abs(sd(x)/mean(x))))
+  return(X[,cv > cutoff])
+}
+  data.filtered <- remove.low.cv(scale_data, 0.5)
+  # 执行线性混合模型样条拟合
+  lmms.output <- lmms::lmmSpline(data = data.filtered, time = time,
+                                 sampleID = rownames(data.filtered), deri = FALSE,
+                                 basis = "p-spline", numCores = 4, timePredict = 1:3,
+                                 keepModels = TRUE)
+  
+  # 提取和处理模型数据
+  modelled.data <- t(slot(lmms.output, 'predSpline'))
+  data.gathered <- modelled.data %>% as.data.frame() %>% 
+    rownames_to_column("time") %>%
+    mutate(time = as.numeric(as.character(time))) %>%
+    pivot_longer(names_to="feature", values_to = 'value', -time)
+  
+  # 绘制样条拟合曲线
+  ggplot(data.gathered, aes(x = time, y = value, color = feature)) + 
+    geom_line() + theme_bw() + ggtitle("`lmms` profiles") + 
+    ylab("Feature expression") + xlab("Time")
+  
+  # 过滤和返回结果
+  filter.res <- lmms.filter.lines(data = data.filtered, 
+                                  lmms.obj = lmms.output, time = time)
+  
+  return(filter.res$filtered)
+}
+```
+
+###代谢
+```{r}
+meta_pos <- read.xlsx("./multi_omics/data/meta_intensity_class_pos.xlsx")
+meta_pos <- meta_pos %>%
+  select(2,14:31) %>%
+  column_to_rownames("Name")
+
+meta_neg <- read.xlsx("./multi_omics/data/meta_intensity_class_neg.xlsx")
+meta_neg <- meta_neg %>%
+  select(2,14:31) %>%
+  column_to_rownames("Name")
+
+sum(colnames(meta_neg) == colnames(meta_pos))
+
+sample_id <- c(paste0("Control",1:6),paste0("Early",1:6),paste0("Late",1:6))
+colnames(meta_neg) <- sample_id
+colnames(meta_pos) <- sample_id
+
+mdata <- rbind(meta_neg,meta_pos)
+
+#合并、标准化、转置数据框
+scale_mdata <- mdata %>%
+  mutate(scale) %>%
+  t() %>%
+  as.data.frame()
+
+meta.data.filtered <- remove.low.cv(scale_mdata, 0.5)
+
+time <- c(1,1,1,1,1,1,2,2,2,2,2,2,3,3,3,3,3,3)
+
+meta_profile.filtered <- plot_and_filter_lmms(meta.data.filtered,time = time)
+```
+
+###蛋白
+```{r}
+pro_data <-read.xlsx("./multi_omics/data/raw_protein_all_sample.xlsx")
+
+pcale_mdata <- pro_data %>%
+  column_to_rownames("Protein") %>%
+  dplyr::select((ncol(.)-8):ncol(.)) %>%
+  mutate(across(everything(), scale)) %>%
+  t() %>%
+  as.data.frame()
+
+time = c(1,1,1,2,2,2,3,3,3)
+pro_profile.filtered <- plot_and_filter_lmms(pcale_mdata,time = time)
+
+
+```
+
+
+###多组学
+```{r}
+X <- list("X" = sc_profile.filtered, "Z" = meta_profile.filtered)
+Y <- as.matrix(pro_profile.filtered)
+
+
+block.pls.res <- block.pls(X=X, Y=Y, ncomp = 5, 
+                           scale = FALSE, mode = "canonical")
+block.ncomp <- getNcomp(block.pls.res,X=X, Y=Y, 
+                        scale = FALSE, mode = "canonical")
+block.ncomp$choice.ncomp
+
+plot(block.ncomp)
+```
+
+```{r}
+# final model
+block.pls.res <- block.pls(X=X, Y=Y, ncomp = 1, scale = FALSE, mode = "canonical")
+# block.pls cluster
+block.pls.cluster <- getCluster(block.pls.res)
+
+# longitudinal cluster plot
+plotLong(block.pls.res)
+```
+```{r}
+test.list.keepX <- list("X" = 1:3, "Z" = c(1:3))
+test.keepY <- c(1:3)
+
+tune.block.res <- tuneCluster.block.spls(X= X, Y= Y, 
+                                         test.list.keepX=test.list.keepX, 
+                                         test.keepY= test.keepY, 
+                                         scale=FALSE, 
+                                         mode = "canonical", ncomp = 1)
+# ncomp = 1 given by the getNcomp() function
+
+# selected features in each component on block X
+tune.block.res$choice.keepX
+
+# selected features in each component on block Y
+tune.block.res$choice.keepY
+
+# final model
+block.pls.res <- block.spls(X=X, Y=Y, 
+                            ncomp = 1, 
+                            scale = FALSE, 
+                            mode = "canonical", 
+                            keepX = tune.block.res$choice.keepX, 
+                            keepY = tune.block.res$choice.keepY)
+
+head(getCluster(block.pls.res))
+
+plotLong(block.pls.res)
+```
+
+```{r}
+# example fro multiblock analysis
+res <- proportionality(block.pls.res)
+# distance between pairs of features
+head(res$propr.distance)[1:6]
+
+# u-test pvalue by clusters
+pval.propr <- res$pvalue
+knitr::kable(pval.propr)
+
+plot(res)
+```
+
+
+
+##mixOmics
+```{r}
+library(mixOmics)
+
+load("./multi_omics/example_data/Data/nmt_data_processed.RData")
+
+X1 <- data$rna # select three of the five dataframes to explore
+X2 <- data$met_genebody
+X3 <- data$acc_genebody
+
+# compile these into a single X object
+X <- list(rna = X1, methylation = X2, accessibility = X3) 
+
+lapply(X, dim) # check dimensions
+
+
+```
+
+
+```{r}
+list.keepX = c(25, 25)
+list.keepY = c(25, 25)
+
+# generate three pairwise PLS models
+pls1 <- spls(X[["rna"]], X[["methylation"]], 
+             keepX = list.keepX, keepY = list.keepY)
+pls2 <- spls(X[["rna"]], X[["accessibility"]], 
+             keepX = list.keepX, keepY = list.keepY)
+pls3 <- spls(X[["methylation"]], X[["accessibility"]], 
+             keepX = list.keepX, keepY = list.keepY)
+
+# plot features of first PLS
+plotVar(pls1, cutoff = 0.5, title = "(a) RNA vs Methylation",
+        legend = c("RNA", "Methylation"),
+        var.names = FALSE, style = 'graphics',
+        pch = c(16, 17), cex = c(2,2),
+        col = c('darkorchid', 'lightgreen'))
+
+# plot features of second PLS
+plotVar(pls2, cutoff = 0.5, title = "(b) RNA vs Accessibility",
+        legend = c("RNA", "Accessibility"),
+        var.names = FALSE, style = 'graphics',
+        pch = c(16, 17), cex = c(2,2),
+        col = c('darkorchid', 'lightgreen'))
+
+# plot features of third PLS
+plotVar(pls3, cutoff = 0.5, title = "(c) Methylation vs Accessibility",
+        legend = c("Methylation", "Accessibility"),
+        var.names = FALSE, style = 'graphics',
+        pch = c(16, 17), cex = c(2,2),
+        col = c('darkorchid', 'lightgreen'))
+
+cor(pls1$variates$X, pls1$variates$Y)
+
+cor(pls2$variates$X, pls2$variates$Y)
+
+cor(pls3$variates$X, pls3$variates$Y) 
+
+# for square matrix filled with 0.5s
+design = matrix(0.5, ncol = length(X), nrow = length(X), 
+                dimnames = list(names(X), names(X)))
+diag(design) = 0 # set diagonal to 0s
+
+basic.mbspls.model = block.spls(X, indY = 1, # generate basic model
+                                ncomp = 5, 
+                                design = design)
+
+choice.ncomp <- 3 
+choice.keepX <- list(rna = rep(50, 3), # 50 features per each component 
+                     methylation = rep(50, 3), 
+                     accessibility = rep(50, 3))
+
+# generate final model using "tuned" parameters
+final.mbspls.model = block.spls(X, indY = 1,  
+                                ncomp = choice.ncomp, 
+                                keepX = choice.keepX,
+                                design = design)
+
+plotIndiv(final.mbspls.model, ind.names = FALSE,
+          group = as.factor(cell_metadata$lineage), 
+          pch = as.factor(cell_metadata$stage),
+          col.per.group = color.mixo(1:8), 
+          legend = TRUE, legend.title = 'Lineage', legend.title.pch = 'Stage',
+          blocks = 1)
+```
+
+
+
