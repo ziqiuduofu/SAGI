@@ -1,0 +1,590 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code. 
+
+Try executing this chunk by clicking the *Run* button within the chunk or by placing your cursor inside it and pressing *Cmd+Shift+Enter*. 
+
+```{r}
+library(Seurat)
+library(ggplot2)
+```
+#定义函数
+```{r}
+do_single <- function(analysis_dat){
+  meg_dat <- NormalizeData(analysis_dat)
+  meg_dat <- FindVariableFeatures(meg_dat)
+  meg_dat <- ScaleData(meg_dat)
+  meg_dat <- RunPCA(meg_dat, features = VariableFeatures(object = meg_dat))
+  VizDimLoadings(meg_dat, dims = 1:2, reduction = "pca")
+  meg_dat <- FindNeighbors(meg_dat, dims = 1:8)
+  meg_dat <- FindClusters(meg_dat, resolution = 0.6)
+  meg_dat <- RunUMAP(meg_dat, dims = 1:8)
+  return(meg_dat)
+}
+```
+
+
+#数据粗筛
+```{r}
+pbmc.data <- readRDS("./original data/blood_multi_res06_combined.rds")
+
+pbmc <- CreateSeuratObject(counts = pbmc.data@assays$RNA$counts, project = "pbmc3k", min.cells = 3, min.features = 200)
+
+pbmc.data@assays$RNA$counts
+
+View(pbmc.data@meta.data)
+View(pbmc@meta.data)
+
+pbmc@meta.data$orig.ident <- pbmc.data@meta.data$orig.ident
+rm(pbmc.data)
+```
+
+```{r}
+pbmc[["percent.mt"]] <- PercentageFeatureSet(pbmc, pattern = "^MT-")
+```
+
+```{r}
+# Visualize QC metrics as a violin plot
+VlnPlot(pbmc, features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+
+```
+
+```{r}
+# FeatureScatter is typically used to visualize feature-feature relationships, but can be used
+# for anything calculated by the object, i.e. columns in object metadata, PC scores etc.
+
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+```
+
+```{r}
+print(nrow(pbmc@meta.data))
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt < 5)
+print(nrow(pbmc@meta.data))
+```
+
+```{r}
+pbmc <- NormalizeData(pbmc)
+```
+
+```{r}
+pbmc <- FindVariableFeatures(pbmc, selection.method = "vst", nfeatures = 2000)
+
+# Identify the 10 most highly variable genes
+top10 <- head(VariableFeatures(pbmc), 10)
+
+# plot variable features with and without labels
+plot1 <- VariableFeaturePlot(pbmc)
+plot2 <- LabelPoints(plot = plot1, points = top10, repel = TRUE)
+plot1 + plot2
+```
+
+```{r}
+all.genes <- rownames(pbmc)
+
+pbmc <- ScaleData(pbmc, features = all.genes)
+
+
+```
+
+##Perform linear dimensional reduction
+
+```{r}
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+```
+
+```{r}
+# Examine and visualize PCA results a few different ways
+print(pbmc[["pca"]], dims = 1:5, nfeatures = 5)
+```
+
+```{r}
+VizDimLoadings(pbmc, dims = 1:2, reduction = "pca")
+```
+
+```{r}
+DimPlot(pbmc, reduction = "pca") + NoLegend()
+```
+
+```{r}
+DimHeatmap(pbmc, dims = 1:15, cells = 500, balanced = TRUE)
+```
+
+##Determine the ‘dimensionality’ of the dataset
+```{r}
+ElbowPlot(pbmc)
+```
+##cluster the cells
+```{r}
+pbmc <- FindNeighbors(pbmc, dims = 1:10)
+
+pbmc <- FindClusters(pbmc, resolution = 0.5)
+```
+
+```{r}
+# Look at cluster IDs of the first 5 cells
+head(Idents(pbmc), 5)
+```
+
+##Run non-linear dimensional reduction (UMAP/tSNE)
+```{r}
+pbmc <- RunUMAP(pbmc, dims = 1:10)
+```
+
+```{r}
+# note that you can set `label = TRUE` or use the LabelClusters function to help label
+# individual clusters
+DimPlot(pbmc, reduction = "umap",label = T)
+```
+
+```{r}
+pbmc@meta.data <- pbmc@meta.data %>%
+  mutate(group = case_when(
+    orig.ident %in% c("D_B_CON_1","D_B_CON_2","D_B_CON_3") ~ "Con",
+    orig.ident %in% c("D_B_24H_1","D_B_24H_2","D_B_24H_3") ~ "F_24h",
+    orig.ident %in% c("D_B_48H_1","D_B_48H_2","D_B_48H_3") ~ "S_48h"
+  ))
+
+
+unique(pbmc@meta.data$orig.ident)
+```
+
+
+```{r}
+dir.create("./data")
+saveRDS(pbmc, file = "./data/pbmc_data.rds")
+```
+
+
+
+#数据分析
+```{r}
+pbmc <- readRDS("./data/pbmc_data.rds")
+
+dim(pbmc@meta.data)
+```
+
+
+##Finding differentially expressed features (cluster biomarkers)
+```{r}
+# find markers for every cluster compared to all remaining cells, report only the positive
+# ones
+pbmc <- SetIdent(pbmc,value = pbmc@meta.data$seurat_clusters)
+pbmc.markers <- FindAllMarkers(pbmc, only.pos = TRUE)
+saveRDS(pbmc.markers,"./data/pbmc.marker.rds")
+
+head(pbmc.markers)
+
+openxlsx::write.xlsx(pbmc.markers,"./results/allmarkers.xlsx",overwrite = T)
+
+
+
+
+```
+
+```{r}
+VlnPlot(pbmc,features = c("Cd3e","Cd4","Cd8a","Cd8b1","Cd44"),
+        pt.size = 0,stack = T,flip = T)
+```
+
+```{r}
+rownames(pbmc.markers) <- pbmc.markers$gene
+pbmc.markers %>%
+    group_by(cluster) %>%
+    dplyr::filter(avg_log2FC > 1) %>%
+    slice_head(n = 10) %>%
+    ungroup() -> top10
+
+DoHeatmap(pbmc, features = top10$gene) + NoLegend()
+```
+
+```{r}
+VlnPlot(pbmc,c("Cd3e","Cd200","Itgam","Mpo","Cd14","Pparg"),
+        pt.size = 0,
+        stack = T,
+        flip = T)
+
+unique(pbmc@meta.data$orig.ident)
+```
+
+
+
+
+
+
+
+#细胞类型定义
+```{r}
+library(dplyr)
+pbmc@meta.data <- pbmc@meta.data %>%
+  mutate(cell_raw = case_when(
+    seurat_clusters %in% c(0,6,7) ~ "CD4+T",
+    seurat_clusters %in% c(1,3,10,16) ~ "B Cell",
+    seurat_clusters %in% c(2,17) ~ "CD8+T",
+    seurat_clusters %in% c(4,5) ~ "NK",
+    seurat_clusters %in% c(8,14) ~ "Erythroid progenitors",
+    seurat_clusters %in% c(9,12,15) ~ "Megakaryocyte",
+    seurat_clusters %in% c(11) ~ "Neutrophil",
+    seurat_clusters %in% c(13) ~ "Double-negative T cell"
+  ))
+
+pbmc@meta.data$cell_raw <- as.factor(pbmc@meta.data$cell_raw)
+
+DimPlot(pbmc,label = T,split.by = "group")
+View(pbmc@meta.data)
+
+
+
+```
+
+```{r}
+c13 <- subset(pbmc,subset = seurat_clusters == 13)
+c7 <- subset(pbmc,subset = seurat_clusters == 7)
+c16 <- subset(pbmc,subset = seurat_clusters == 16)
+
+
+
+View(c13@meta.data)
+
+table(c13$group,c13$orig.ident)
+table(c7$group,c7$orig.ident)
+table(c16$group,c16$orig.ident)
+```
+
+```{r}
+#中性粒细胞
+FeaturePlot(pbmc,features = c("Ly6g","Itgam","Cxcr2","Sell","Fcgr3","S100a8"))
+
+#巨噬细胞
+FeaturePlot(pbmc,features = c("Cx3cr1","Tnf"))
+```
+
+```{r}
+pbmc <- SetIdent(pbmc,value = pbmc@meta.data$cell_raw)
+
+DimPlot(pbmc,label = T)
+```
+
+##巨核细胞
+```{r}
+mega <- subset(pbmc, subset = cell_raw == "Megakaryocyte")
+```
+
+```{r}
+meg_dat <- NormalizeData(mega)
+View(meg_dat@meta.data)
+
+meg_dat <- FindVariableFeatures(meg_dat)
+meg_dat <- ScaleData(meg_dat)
+
+meg_dat <- RunPCA(meg_dat, features = VariableFeatures(object = meg_dat))
+
+VizDimLoadings(meg_dat, dims = 1:2, reduction = "pca")
+ElbowPlot(meg_dat)
+meg_dat <- FindNeighbors(meg_dat, dims = 1:7)
+meg_dat <- FindClusters(meg_dat, resolution = 0.6)
+```
+
+```{r}
+meg_dat <- RunUMAP(meg_dat, dims = 1:7)
+DimPlot(meg_dat,label = T)
+
+mega.markers <- FindAllMarkers(meg_dat)
+openxlsx::write.xlsx(mega.markers,"./results/mega.markers.xlsx")
+
+summary(meg_dat@meta.data$seurat_clusters)
+
+meg_dat@meta.data <- meg_dat@meta.data %>%
+  mutate(cell_type = case_when(
+    seurat_clusters %in% c(0,6) ~ "CD4+T",
+    seurat_clusters %in% c(1,4) ~ "B cell",
+    seurat_clusters %in% c(2) ~ "CD8+T",
+    seurat_clusters %in% c(3,5) ~ "Mega",
+    T ~ "Delete"
+  ))
+
+summary(as.factor(meg_dat@meta.data$cell_type))
+
+saveRDS(meg_dat,"./data/meg_dat.rds")
+
+```
+
+```{r}
+table(meg_dat@meta.data$cell_type)
+```
+##B or DC
+```{r}
+# 将pbmc@meta.data和meg_dat@meta.data数据框分别赋值给pbmc_meta和meg_meta
+pbmc_meta <- pbmc@meta.data
+meg_meta <- meg_dat@meta.data
+# 从meg_meta中筛选出cell_type为B cell的行
+b_cell_meta <- meg_meta[meg_meta$cell_type == "B cell", ]
+# 使用行名将b_cell_meta的信息添加到pbmc_meta中
+# 找到b_cell_meta的行名在pbmc_meta中的位置
+match_indices <- match(rownames(b_cell_meta), rownames(pbmc_meta))
+# 将b_cell_meta的cell_type信息添加到pbmc_meta的相应位置
+pbmc_meta$cell_type[match_indices] <- b_cell_meta$cell_type
+
+
+pbmc@meta.data$cell_type[match(rownames())] <- meg_dat@meta.data[meg_dat@meta.data$cell_type == "B cell",]
+
+pbmc@meta.data$cell_type[match(rownames(pbmc@meta.data), rownames(meg_dat@meta.data[meg_dat@meta.data$cell_type == "B cell",]))] <- "B cell"
+```
+
+```{r}
+B_cell <- subset(pbmc,subset = cell_type == "B cell")
+
+B_cell <- do_single(B_cell)
+saveRDS(B_cell,"./data/B_cell.rds")
+
+B_cell <- readRDS("./data/B_cell.rds")
+```
+
+```{r}
+b.marker <- FindAllMarkers(B_cell)
+openxlsx::write.xlsx(b.marker,"./results/B_markers.xlsx")
+FeaturePlot(B_cell,features = c("Cd79a","Cd4","Sell"))
+```
+###hdWGCNA 
+```{r}
+# single-cell analysis package
+library(Seurat)
+
+# plotting and data science packages
+library(tidyverse)
+library(cowplot)
+library(patchwork)
+
+# co-expression network analysis packages:
+library(WGCNA)
+library(hdWGCNA)
+
+# using the cowplot theme for ggplot
+theme_set(theme_cowplot())
+
+# set random seed for reproducibility
+set.seed(42)
+
+# optionally enable multithreading
+enableWGCNAThreads(nThreads = 8)
+```
+
+```{r}
+seurat_obj <- B_cell
+```
+
+```{r}
+seurat_obj <- SetupForWGCNA(
+  seurat_obj,
+  gene_select = "fraction", # the gene selection approach
+  fraction = 0.05, # fraction of cells that a gene needs to be expressed in order to be included
+  wgcna_name = "tutorial" # the name of the hdWGCNA experiment
+)
+```
+
+```{r}
+# construct metacells  in each group
+seurat_obj <- MetacellsByGroups(
+  seurat_obj = seurat_obj,
+  group.by = c("cell_type", "group","seurat_clusters"), # specify the columns in seurat_obj@meta.data to group by
+  reduction = 'umap', # select the dimensionality reduction to perform KNN on
+  k = 25, # nearest-neighbors parameter
+  max_shared = 10, # maximum number of shared cells between two metacells
+  ident.group = 'cell_type' # set the Idents of the metacell seurat object
+)
+
+# normalize metacell expression matrix:
+seurat_obj <- NormalizeMetacells(seurat_obj)
+
+
+View(seurat_obj@misc$tutorial$wgcna_metacell_obj@meta.data)
+```
+
+```{r}
+# Add a variable 'cluster_hdwgcna' to the metacells Seurat object:
+seurat_obj@misc$tutorial$wgcna_metacell_obj$group <- seurat_obj@misc$tutorial$wgcna_metacell_obj@active.ident
+```
+
+```{r}
+seurat_obj <- SetDatExpr(
+  seurat_obj,
+  group_name = c(0:7), # the name of the group of interest in the group.by column
+  group.by='seurat_clusters', # the metadata column containing the cell type info. This same column should have also been used in MetacellsByGroups
+  assay = 'RNA', # using RNA assay
+  slot = 'data' # using normalized data
+)
+```
+
+```{r}
+# Test different soft powers:
+seurat_obj <- TestSoftPowers(
+  seurat_obj,
+  networkType = 'signed' # you can also use "unsigned" or "signed hybrid"
+)
+
+# plot the results:
+plot_list <- PlotSoftPowers(seurat_obj)
+
+# assemble with patchwork
+wrap_plots(plot_list, ncol=2)
+```
+
+```{r}
+power_table <- GetPowerTable(seurat_obj)
+head(power_table)
+```
+
+```{r}
+# construct co-expression network:
+seurat_obj <- ConstructNetwork(
+  seurat_obj,
+  tom_name = 'SEP' # name of the topoligical overlap matrix written to disk
+)
+```
+
+```{r}
+PlotDendrogram(seurat_obj, main='SEP hdWGCNA Dendrogram')
+```
+
+```{r}
+# need to run ScaleData first or else harmony throws an error:
+#seurat_obj <- ScaleData(seurat_obj, features=VariableFeatures(seurat_obj))
+
+# compute all MEs in the full single-cell dataset
+seurat_obj <- ModuleEigengenes(
+ seurat_obj,
+ group.by.vars="seurat_clusters"
+)
+```
+
+```{r}
+# harmonized module eigengenes:
+hMEs <- GetMEs(seurat_obj)
+
+# module eigengenes:
+MEs <- GetMEs(seurat_obj, harmonized=FALSE)
+```
+
+```{r}
+# compute eigengene-based connectivity (kME):
+seurat_obj <- ModuleConnectivity(
+  seurat_obj,
+  group.by = 'seurat_clusters',group_name = c(0:7)
+)
+
+seurat_obj@misc$tutorial$wgcna_modules
+```
+
+```{r}
+# rename the modules
+seurat_obj <- ResetModuleNames(
+  seurat_obj,
+  new_name = "SEP-M"
+)
+```
+
+```{r}
+# plot genes ranked by kME for each module
+p <- PlotKMEs(seurat_obj, ncol=3)
+
+p
+```
+
+```{r}
+# get the module assignment table:
+modules <- GetModules(seurat_obj) %>% subset(module != 'grey')
+
+# show the first 6 columns:
+head(modules[,1:6])
+```
+
+```{r}
+# get hub genes
+hub_df <- GetHubGenes(seurat_obj, n_hubs = 10)
+
+head(hub_df)
+```
+
+```{r}
+# compute gene scoring for the top 25 hub genes by kME for each module
+# with UCell method
+library(UCell)
+seurat_obj <- ModuleExprScore(
+  seurat_obj,
+  n_genes = 25,
+  method='UCell'
+)
+```
+
+```{r}
+# make a featureplot of hMEs for each module
+plot_list <- ModuleFeaturePlot(
+  seurat_obj,
+  features='hMEs', # plot the hMEs
+  order=TRUE # order so the points with highest hMEs are on top
+)
+
+# stitch together with patchwork
+wrap_plots(plot_list, ncol=3)
+```
+
+```{r}
+# make a featureplot of hub scores for each module
+plot_list <- ModuleFeaturePlot(
+  seurat_obj,
+  features='scores', # plot the hub gene scores
+  order='shuffle', # order so cells are shuffled
+  ucell = TRUE # depending on Seurat vs UCell for gene scoring
+)
+
+# stitch together with patchwork
+wrap_plots(plot_list, ncol=3)
+```
+
+```{r}
+seurat_obj$cluster <- do.call(rbind, strsplit(as.character(seurat_obj$annotation), ' '))[,1]
+
+ModuleRadarPlot(
+  seurat_obj,
+  group.by = 'seurat_clusters',
+  barcodes = seurat_obj@meta.data %>% subset(cell_type == 'B cell') %>% rownames(),
+  axis.label.size=4,
+  grid.label.size=4
+)
+
+
+```
+
+```{r}
+# get hMEs from seurat object
+MEs <- GetMEs(seurat_obj, harmonized=TRUE)
+modules <- GetModules(seurat_obj)
+mods <- levels(modules$module); mods <- mods[mods != 'grey']
+
+# add hMEs to Seurat meta-data:
+seurat_obj@meta.data <- cbind(seurat_obj@meta.data, MEs)
+```
+
+```{r}
+# plot with Seurat's DotPlot function
+p <- DotPlot(seurat_obj, features=mods, group.by = 'seurat_clusters')
+
+# flip the x/y axes, rotate the axis labels, and change color scheme:
+p <- p +
+  RotatedAxis() +
+  scale_color_gradient2(high='red', mid='grey95', low='blue')
+
+# plot output
+p
+```
+
+```{r}
+saveRDS(seurat_obj,"./data/B_cell_hdWGCNA.rds")
+saveRDS(modules,"./data/B_cell_modules.rds")
+```
+
